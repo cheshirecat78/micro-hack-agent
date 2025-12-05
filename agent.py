@@ -34,7 +34,7 @@ except ImportError:
     sys.exit(1)
 
 # Agent version
-VERSION = "1.2.3"
+VERSION = "1.3.0"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -45,38 +45,334 @@ AGENT_UPDATE_URL = os.environ.get(
 # Supported tools and their install commands (Debian/Ubuntu based)
 # Note: Some tools require additional setup or alternative installation methods
 TOOL_INSTALL_COMMANDS = {
+    # === Network Scanning ===
     "nmap": {
         "check": "nmap",
         "install": ["apt-get", "install", "-y", "nmap"],
-        "description": "Network scanner",
-        "pre_install": None
+        "description": "Network scanner & port discovery",
+        "category": "network"
     },
+    "masscan": {
+        "check": "masscan",
+        "install": ["apt-get", "install", "-y", "masscan"],
+        "description": "Fast port scanner",
+        "category": "network"
+    },
+    "netcat": {
+        "check": "nc",
+        "install": ["apt-get", "install", "-y", "netcat-openbsd"],
+        "description": "Network utility (nc)",
+        "category": "network"
+    },
+    "tcpdump": {
+        "check": "tcpdump",
+        "install": ["apt-get", "install", "-y", "tcpdump"],
+        "description": "Packet analyzer",
+        "category": "network"
+    },
+    "traceroute": {
+        "check": "traceroute",
+        "install": ["apt-get", "install", "-y", "traceroute"],
+        "description": "Network path tracer",
+        "category": "network"
+    },
+    "whois": {
+        "check": "whois",
+        "install": ["apt-get", "install", "-y", "whois"],
+        "description": "Domain/IP lookup",
+        "category": "network"
+    },
+    "dnsutils": {
+        "check": "dig",
+        "install": ["apt-get", "install", "-y", "dnsutils"],
+        "description": "DNS tools (dig, nslookup)",
+        "category": "network"
+    },
+    "net-tools": {
+        "check": "netstat",
+        "install": ["apt-get", "install", "-y", "net-tools"],
+        "description": "Network tools (netstat, ifconfig)",
+        "category": "network"
+    },
+    "iputils": {
+        "check": "ping",
+        "install": ["apt-get", "install", "-y", "iputils-ping"],
+        "description": "Ping utility",
+        "category": "network"
+    },
+    "arp-scan": {
+        "check": "arp-scan",
+        "install": ["apt-get", "install", "-y", "arp-scan"],
+        "description": "ARP scanner for local network",
+        "category": "network"
+    },
+    "hping3": {
+        "check": "hping3",
+        "install": ["apt-get", "install", "-y", "hping3"],
+        "description": "TCP/IP packet assembler",
+        "category": "network"
+    },
+    
+    # === Web Scanning ===
     "nikto": {
         "check": "nikto",
-        # nikto is in Debian, but might need to enable non-free or use git
         "install": ["apt-get", "install", "-y", "nikto"],
         "install_alt": ["git", "clone", "https://github.com/sullo/nikto.git", "/opt/nikto"],
         "post_install_alt": ["ln", "-sf", "/opt/nikto/program/nikto.pl", "/usr/local/bin/nikto"],
-        "description": "Web server scanner",
-        "pre_install": None
+        "description": "Web server vulnerability scanner",
+        "category": "web"
     },
     "dirb": {
         "check": "dirb",
         "install": ["apt-get", "install", "-y", "dirb"],
-        "description": "Web content scanner",
-        "pre_install": None
+        "description": "Web directory brute-forcer",
+        "category": "web"
     },
     "gobuster": {
         "check": "gobuster",
         "install": ["apt-get", "install", "-y", "gobuster"],
-        "description": "Directory/file brute-forcer",
-        "pre_install": None
+        "description": "Directory/DNS brute-forcer",
+        "category": "web"
     },
     "whatweb": {
         "check": "whatweb",
         "install": ["apt-get", "install", "-y", "whatweb"],
-        "description": "Web technology scanner",
-        "pre_install": None
+        "description": "Web technology fingerprinter",
+        "category": "web"
+    },
+    "wfuzz": {
+        "check": "wfuzz",
+        "install": ["apt-get", "install", "-y", "wfuzz"],
+        "description": "Web fuzzer",
+        "category": "web"
+    },
+    "curl": {
+        "check": "curl",
+        "install": ["apt-get", "install", "-y", "curl"],
+        "description": "HTTP client",
+        "category": "web"
+    },
+    "wget": {
+        "check": "wget",
+        "install": ["apt-get", "install", "-y", "wget"],
+        "description": "File downloader",
+        "category": "web"
+    },
+    "httpie": {
+        "check": "http",
+        "install": ["apt-get", "install", "-y", "httpie"],
+        "description": "Modern HTTP client",
+        "category": "web"
+    },
+    
+    # === SSL/TLS ===
+    "sslscan": {
+        "check": "sslscan",
+        "install": ["apt-get", "install", "-y", "sslscan"],
+        "description": "SSL/TLS scanner",
+        "category": "ssl"
+    },
+    "sslyze": {
+        "check": "sslyze",
+        "install": ["pip3", "install", "sslyze"],
+        "description": "SSL/TLS configuration analyzer",
+        "category": "ssl"
+    },
+    "testssl": {
+        "check": "testssl",
+        "install": ["apt-get", "install", "-y", "testssl.sh"],
+        "install_alt": ["git", "clone", "--depth", "1", "https://github.com/drwetter/testssl.sh.git", "/opt/testssl"],
+        "post_install_alt": ["ln", "-sf", "/opt/testssl/testssl.sh", "/usr/local/bin/testssl"],
+        "description": "TLS/SSL testing tool",
+        "category": "ssl"
+    },
+    
+    # === Password/Hash Tools ===
+    "hydra": {
+        "check": "hydra",
+        "install": ["apt-get", "install", "-y", "hydra"],
+        "description": "Login brute-forcer",
+        "category": "password"
+    },
+    "john": {
+        "check": "john",
+        "install": ["apt-get", "install", "-y", "john"],
+        "description": "Password cracker (John the Ripper)",
+        "category": "password"
+    },
+    "hashcat": {
+        "check": "hashcat",
+        "install": ["apt-get", "install", "-y", "hashcat"],
+        "description": "Advanced password recovery",
+        "category": "password"
+    },
+    "hashid": {
+        "check": "hashid",
+        "install": ["pip3", "install", "hashid"],
+        "description": "Hash type identifier",
+        "category": "password"
+    },
+    
+    # === Exploitation ===
+    "sqlmap": {
+        "check": "sqlmap",
+        "install": ["apt-get", "install", "-y", "sqlmap"],
+        "description": "SQL injection tool",
+        "category": "exploit"
+    },
+    "metasploit": {
+        "check": "msfconsole",
+        "install": ["apt-get", "install", "-y", "metasploit-framework"],
+        "description": "Exploitation framework",
+        "category": "exploit"
+    },
+    "searchsploit": {
+        "check": "searchsploit",
+        "install": ["apt-get", "install", "-y", "exploitdb"],
+        "description": "Exploit database search",
+        "category": "exploit"
+    },
+    
+    # === Enumeration ===
+    "enum4linux": {
+        "check": "enum4linux",
+        "install": ["apt-get", "install", "-y", "enum4linux"],
+        "description": "SMB/Samba enumerator",
+        "category": "enum"
+    },
+    "smbclient": {
+        "check": "smbclient",
+        "install": ["apt-get", "install", "-y", "smbclient"],
+        "description": "SMB/CIFS client",
+        "category": "enum"
+    },
+    "snmpwalk": {
+        "check": "snmpwalk",
+        "install": ["apt-get", "install", "-y", "snmp"],
+        "description": "SNMP enumeration",
+        "category": "enum"
+    },
+    "nbtscan": {
+        "check": "nbtscan",
+        "install": ["apt-get", "install", "-y", "nbtscan"],
+        "description": "NetBIOS scanner",
+        "category": "enum"
+    },
+    "ldapsearch": {
+        "check": "ldapsearch",
+        "install": ["apt-get", "install", "-y", "ldap-utils"],
+        "description": "LDAP enumeration",
+        "category": "enum"
+    },
+    
+    # === Wireless (if applicable) ===
+    "aircrack-ng": {
+        "check": "aircrack-ng",
+        "install": ["apt-get", "install", "-y", "aircrack-ng"],
+        "description": "WiFi security tools",
+        "category": "wireless"
+    },
+    
+    # === Forensics/Analysis ===
+    "binwalk": {
+        "check": "binwalk",
+        "install": ["apt-get", "install", "-y", "binwalk"],
+        "description": "Firmware analysis",
+        "category": "forensics"
+    },
+    "foremost": {
+        "check": "foremost",
+        "install": ["apt-get", "install", "-y", "foremost"],
+        "description": "File recovery",
+        "category": "forensics"
+    },
+    "exiftool": {
+        "check": "exiftool",
+        "install": ["apt-get", "install", "-y", "libimage-exiftool-perl"],
+        "description": "Metadata extractor",
+        "category": "forensics"
+    },
+    "strings": {
+        "check": "strings",
+        "install": ["apt-get", "install", "-y", "binutils"],
+        "description": "Extract strings from files",
+        "category": "forensics"
+    },
+    
+    # === Utilities ===
+    "git": {
+        "check": "git",
+        "install": ["apt-get", "install", "-y", "git"],
+        "description": "Version control",
+        "category": "util"
+    },
+    "jq": {
+        "check": "jq",
+        "install": ["apt-get", "install", "-y", "jq"],
+        "description": "JSON processor",
+        "category": "util"
+    },
+    "vim": {
+        "check": "vim",
+        "install": ["apt-get", "install", "-y", "vim"],
+        "description": "Text editor",
+        "category": "util"
+    },
+    "tmux": {
+        "check": "tmux",
+        "install": ["apt-get", "install", "-y", "tmux"],
+        "description": "Terminal multiplexer",
+        "category": "util"
+    },
+    "screen": {
+        "check": "screen",
+        "install": ["apt-get", "install", "-y", "screen"],
+        "description": "Terminal session manager",
+        "category": "util"
+    },
+    "unzip": {
+        "check": "unzip",
+        "install": ["apt-get", "install", "-y", "unzip"],
+        "description": "Unzip utility",
+        "category": "util"
+    },
+    "p7zip": {
+        "check": "7z",
+        "install": ["apt-get", "install", "-y", "p7zip-full"],
+        "description": "7-Zip archiver",
+        "category": "util"
+    },
+    "tree": {
+        "check": "tree",
+        "install": ["apt-get", "install", "-y", "tree"],
+        "description": "Directory tree viewer",
+        "category": "util"
+    },
+    "htop": {
+        "check": "htop",
+        "install": ["apt-get", "install", "-y", "htop"],
+        "description": "Process viewer",
+        "category": "util"
+    },
+    
+    # === Python Tools ===
+    "impacket": {
+        "check": "impacket-secretsdump",
+        "install": ["pip3", "install", "impacket"],
+        "description": "Network protocol tools",
+        "category": "python"
+    },
+    "crackmapexec": {
+        "check": "crackmapexec",
+        "install": ["pip3", "install", "crackmapexec"],
+        "description": "Network pentesting tool",
+        "category": "python"
+    },
+    "pwntools": {
+        "check": "pwn",
+        "install": ["pip3", "install", "pwntools"],
+        "description": "CTF/exploit dev framework",
+        "category": "python"
     }
 }
 

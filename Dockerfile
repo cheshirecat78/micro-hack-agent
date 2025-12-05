@@ -1,25 +1,22 @@
 # micro-hack remote agent
-# Lightweight Python agent that connects to micro-hack server via WebSocket
-# Includes nmap for network scanning capabilities
+# Minimal Python agent that connects to micro-hack server via WebSocket
+# All security tools are installed on-demand via the UI
 
 FROM python:3.11-slim
 
 LABEL maintainer="micro-hack team"
 LABEL description="micro-hack remote agent for distributed operations"
-LABEL version="1.2.3"
+LABEL version="1.3.0"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Install nmap and other scanning tools
-# Additional tools (nikto, dirb, etc.) can be installed on-demand via the agent
+# Minimal base - only what's needed for the agent to run and install tools later
+# Security tools (nmap, nikto, dirb, etc.) are installed on-demand via the UI
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    nmap \
-    iputils-ping \
-    net-tools \
     curl \
-    git \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
