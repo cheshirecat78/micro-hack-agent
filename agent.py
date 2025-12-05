@@ -41,12 +41,12 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 # Agent version
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
     "MICROHACK_AGENT_UPDATE_URL", 
-    "https://raw.githubusercontent.com/cheshirecat78/micro-hack/main/agent/agent.py"
+    "https://raw.githubusercontent.com/cheshirecat78/micro-hack-agent/main/agent.py"
 )
 
 # Supported tools and their install commands (Debian/Ubuntu based)
