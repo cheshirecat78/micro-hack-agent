@@ -1,0 +1,57 @@
+# micro-hack remote agent - docker-compose
+# 
+# Quick Start:
+# 1. Create an agent API key in micro-hack (Settings > Agents > Create Key)
+# 2. Set environment variables or edit this file
+# 3. Run: docker-compose up -d
+#
+# The agent will automatically connect and appear in your micro-hack dashboard.
+
+services:
+  micro-hack-agent:
+    # Option 1: Use pre-built image from Docker Hub (recommended)
+    image: cheshirecat78/micro-hack-agent:latest
+    
+    # Option 2: Build locally (uncomment to use)
+    # build: .
+    
+    container_name: micro-hack-agent
+    restart: unless-stopped
+    
+    environment:
+      # Required: Your micro-hack server WebSocket URL
+      # Use wss:// for production (HTTPS), ws:// for local development
+      - MICROHACK_SERVER_URL=${MICROHACK_SERVER_URL:-wss://app.micro-hack.nl}
+      
+      # Required: Your agent API key from micro-hack
+      # Get this from: Settings > Agents > Create Key
+      - MICROHACK_API_KEY=${MICROHACK_API_KEY:-your_api_key_here}
+    
+    # Optional: Mount volumes if the agent needs access to host files
+    # volumes:
+    #   - /var/log:/host/logs:ro
+    
+    # Optional: Give the agent access to host network for network scanning
+    # network_mode: host
+    
+    # Optional: Resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 256M
+    #       cpus: '0.5'
+
+# To run multiple agents, duplicate the service with different names:
+#
+# services:
+#   agent-server1:
+#     image: cheshirecat78/micro-hack-agent:latest
+#     environment:
+#       - MICROHACK_SERVER_URL=wss://app.micro-hack.nl
+#       - MICROHACK_API_KEY=mh_agent_key_for_server1
+#
+#   agent-server2:
+#     image: cheshirecat78/micro-hack-agent:latest
+#     environment:
+#       - MICROHACK_SERVER_URL=wss://app.micro-hack.nl
+#       - MICROHACK_API_KEY=mh_agent_key_for_server2
