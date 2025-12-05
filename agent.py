@@ -218,6 +218,7 @@ class MicroHackAgent:
         self.local_ip = self._get_local_ip()
         self.remote_ip = None
         self.location = None
+        self.network_interfaces = []
     
     def _get_local_ip(self) -> str:
         """Get local IP address"""
@@ -268,6 +269,67 @@ class MicroHackAgent:
         
         return False
     
+    def _get_network_interfaces(self) -> list:
+        """Detect network interfaces and their types (lan, wifi, docker, vpn, etc.)"""
+        interfaces = []
+        
+        if not PSUTIL_AVAILABLE:
+            return interfaces
+        
+        try:
+            # Get all network interfaces with addresses
+            addrs = psutil.net_if_addrs()
+            stats = psutil.net_if_stats()
+            
+            for iface_name, addr_list in addrs.items():
+                # Skip loopback
+                if iface_name.lower() in ['lo', 'loopback', 'lo0']:
+                    continue
+                    
+                # Check if interface is up
+                if iface_name in stats and not stats[iface_name].isup:
+                    continue
+                
+                # Get IPv4 address
+                ipv4 = None
+                for addr in addr_list:
+                    if addr.family == socket.AF_INET:
+                        ipv4 = addr.address
+                        break
+                
+                if not ipv4 or ipv4.startswith('127.'):
+                    continue
+                
+                # Determine interface type
+                iface_lower = iface_name.lower()
+                iface_type = 'lan'  # default
+                
+                # Docker interfaces
+                if 'docker' in iface_lower or 'br-' in iface_lower or iface_lower.startswith('veth'):
+                    iface_type = 'docker'
+                # WiFi interfaces
+                elif any(w in iface_lower for w in ['wlan', 'wifi', 'wl', 'wireless', 'wi-fi', 'airport']):
+                    iface_type = 'wifi'
+                # VPN interfaces
+                elif any(v in iface_lower for v in ['tun', 'tap', 'vpn', 'wg', 'wireguard', 'ppp', 'utun']):
+                    iface_type = 'vpn'
+                # Virtual/VM interfaces
+                elif any(v in iface_lower for v in ['vmnet', 'vbox', 'virbr', 'vnic']):
+                    iface_type = 'virtual'
+                # Ethernet/LAN (default for eth, en, etc.)
+                elif any(e in iface_lower for e in ['eth', 'en0', 'en1', 'eno', 'enp', 'em']):
+                    iface_type = 'lan'
+                
+                interfaces.append({
+                    'name': iface_name,
+                    'type': iface_type,
+                    'ip': ipv4
+                })
+        except Exception as e:
+            self.log(f"Error detecting network interfaces: {e}", "WARNING")
+        
+        return interfaces
+    
     def _get_remote_ip_and_location(self) -> tuple:
         """Get remote/public IP and geolocation using ip-api.com (free, no key required)"""
         try:
@@ -291,12 +353,13 @@ class MicroHackAgent:
         return None, None
     
     def refresh_network_info(self):
-        """Refresh network information (local IP, remote IP, location)"""
+        """Refresh network information (local IP, remote IP, location, interfaces)"""
         old_local_ip = self.local_ip
         old_remote_ip = self.remote_ip
         
         self.local_ip = self._get_local_ip()
         self.remote_ip, self.location = self._get_remote_ip_and_location()
+        self.network_interfaces = self._get_network_interfaces()
         
         if old_local_ip != self.local_ip:
             self.log(f"Local IP changed: {old_local_ip} -> {self.local_ip}")
@@ -304,6 +367,9 @@ class MicroHackAgent:
             self.log(f"Remote IP: {self.remote_ip}")
         if self.location:
             self.log(f"Location: {self.location.get('city')}, {self.location.get('country')}")
+        if self.network_interfaces:
+            iface_types = list(set(i['type'] for i in self.network_interfaces))
+            self.log(f"Network interfaces: {', '.join(iface_types)}")
     
     def log(self, message: str, level: str = "INFO"):
         """Simple logging"""
@@ -359,6 +425,7 @@ class MicroHackAgent:
                 "location": self.location,
                 "version": VERSION,
                 "os": self.os_info,
+                "network_interfaces": self.network_interfaces,
                 "capabilities": ["ping", "info", "nmap", "install_tool", "check_tools", "update_agent"]
             }
         }
