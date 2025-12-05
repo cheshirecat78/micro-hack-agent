@@ -33,6 +33,13 @@ except ImportError:
     print("ERROR: websockets library not installed. Run: pip install websockets")
     sys.exit(1)
 
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    print("WARNING: psutil library not installed. System metrics will not be available. Run: pip install psutil")
+    PSUTIL_AVAILABLE = False
+
 # Agent version
 VERSION = "1.3.2"
 
@@ -360,6 +367,65 @@ class MicroHackAgent:
         loc_str = f" @ {self.location.get('city')}, {self.location.get('country')}" if self.location else ""
         self.log(f"Registered as {self.hostname} ({self.os_info}){loc_str}")
     
+    def get_system_metrics(self) -> dict:
+        """Collect system metrics using psutil"""
+        if not PSUTIL_AVAILABLE:
+            return {}
+        
+        try:
+            # CPU
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            cpu_count = psutil.cpu_count()
+            
+            # Memory
+            mem = psutil.virtual_memory()
+            memory_percent = mem.percent
+            memory_used_gb = round(mem.used / (1024 ** 3), 2)
+            memory_total_gb = round(mem.total / (1024 ** 3), 2)
+            
+            # Disk (root partition)
+            try:
+                if platform.system() == "Windows":
+                    disk = psutil.disk_usage("C:\\")
+                else:
+                    disk = psutil.disk_usage("/")
+                disk_percent = disk.percent
+                disk_used_gb = round(disk.used / (1024 ** 3), 2)
+                disk_total_gb = round(disk.total / (1024 ** 3), 2)
+            except Exception:
+                disk_percent = 0
+                disk_used_gb = 0
+                disk_total_gb = 0
+            
+            # Network
+            net = psutil.net_io_counters()
+            net_bytes_sent = net.bytes_sent
+            net_bytes_recv = net.bytes_recv
+            
+            # Load average (Unix only)
+            try:
+                load_avg = os.getloadavg()
+                load_1min = round(load_avg[0], 2)
+            except (AttributeError, OSError):
+                load_1min = None
+            
+            return {
+                "cpu_percent": cpu_percent,
+                "cpu_count": cpu_count,
+                "memory_percent": memory_percent,
+                "memory_used_gb": memory_used_gb,
+                "memory_total_gb": memory_total_gb,
+                "disk_percent": disk_percent,
+                "disk_used_gb": disk_used_gb,
+                "disk_total_gb": disk_total_gb,
+                "net_bytes_sent": net_bytes_sent,
+                "net_bytes_recv": net_bytes_recv,
+                "load_1min": load_1min
+            }
+        except Exception as e:
+            self.log(f"Error collecting system metrics: {e}", "WARNING")
+            return {}
+    
     async def send_heartbeat(self):
         """Send periodic heartbeat to server"""
         if not self.ws:
@@ -370,7 +436,8 @@ class MicroHackAgent:
             "status": {
                 "uptime": "running",
                 "timestamp": datetime.utcnow().isoformat()
-            }
+            },
+            "system_metrics": self.get_system_metrics()
         }
         
         await self.ws.send(json.dumps(heartbeat))
