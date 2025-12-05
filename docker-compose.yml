@@ -1,20 +1,22 @@
 # micro-hack remote agent - docker-compose
 # 
-# Quick Start:
+# This docker-compose file allows you to run a micro-hack agent that connects
+# to your micro-hack server and waits for commands.
+#
+# Setup:
 # 1. Create an agent API key in micro-hack (Settings > Agents > Create Key)
-# 2. Set environment variables or edit this file
-# 3. Run: docker-compose up -d
+# 2. Copy this file to your server
+# 3. Edit the environment variables below
+# 4. Run: docker-compose up -d
 #
 # The agent will automatically connect and appear in your micro-hack dashboard.
 
+version: '3.8'
+
 services:
   micro-hack-agent:
-    # Option 1: Use pre-built image from Docker Hub (recommended)
+    # Public image from Docker Hub (supports amd64 and arm64)
     image: cheshirecat78/micro-hack-agent:latest
-    
-    # Option 2: Build locally (uncomment to use)
-    # build: .
-    
     container_name: micro-hack-agent
     restart: unless-stopped
     
@@ -25,7 +27,7 @@ services:
       
       # Required: Your agent API key from micro-hack
       # Get this from: Settings > Agents > Create Key
-      - MICROHACK_API_KEY=${MICROHACK_API_KEY:-your_api_key_here}
+      - MICROHACK_API_KEY=${MICROHACK_API_KEY:-mh_agent_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
     
     # Optional: Mount volumes if the agent needs access to host files
     # volumes:
@@ -38,11 +40,10 @@ services:
     # deploy:
     #   resources:
     #     limits:
-    #       memory: 256M
+    #       memory: 128M
     #       cpus: '0.5'
 
-# To run multiple agents, duplicate the service with different names:
-#
+# Alternative: Run multiple agents
 # services:
 #   agent-server1:
 #     image: cheshirecat78/micro-hack-agent:latest

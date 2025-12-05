@@ -34,157 +34,150 @@ except ImportError:
     sys.exit(1)
 
 # Agent version
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
     "MICROHACK_AGENT_UPDATE_URL", 
-    "https://raw.githubusercontent.com/cheshirecat78/micro-hack-agent/main/agent.py"
+    "https://raw.githubusercontent.com/cheshirecat78/micro-hack/main/agent/agent.py"
 )
 
 # Supported tools and their install commands (Debian/Ubuntu based)
-# These match the tools used by micro-hack backend for host scanning
+# Note: Some tools require additional setup or alternative installation methods
 TOOL_INSTALL_COMMANDS = {
-    # === Core Scanning Tools ===
     "nmap": {
         "check": "nmap",
         "install": ["apt-get", "install", "-y", "nmap"],
-        "description": "Network & port scanner",
-        "category": "scan"
+        "description": "Network scanner",
+        "pre_install": None
     },
     "nikto": {
         "check": "nikto",
+        # nikto is in Debian, but might need to enable non-free or use git
         "install": ["apt-get", "install", "-y", "nikto"],
         "install_alt": ["git", "clone", "https://github.com/sullo/nikto.git", "/opt/nikto"],
         "post_install_alt": ["ln", "-sf", "/opt/nikto/program/nikto.pl", "/usr/local/bin/nikto"],
-        "description": "Web server vulnerability scanner",
-        "category": "web"
+        "description": "Web server scanner",
+        "pre_install": None
     },
     "dirb": {
         "check": "dirb",
         "install": ["apt-get", "install", "-y", "dirb"],
-        "description": "Web directory brute-forcer",
-        "category": "web"
+        "description": "Web content scanner",
+        "pre_install": None
     },
     "gobuster": {
         "check": "gobuster",
         "install": ["apt-get", "install", "-y", "gobuster"],
-        "description": "Directory/DNS brute-forcer",
-        "category": "web"
+        "description": "Directory/file brute-forcer",
+        "pre_install": None
     },
     "whatweb": {
         "check": "whatweb",
         "install": ["apt-get", "install", "-y", "whatweb"],
-        "description": "Web technology fingerprinter",
-        "category": "web"
+        "description": "Web technology scanner",
+        "pre_install": None
     },
-    
-    # === SSL/TLS ===
-    "sslscan": {
-        "check": "sslscan",
-        "install": ["apt-get", "install", "-y", "sslscan"],
-        "description": "SSL/TLS scanner",
-        "category": "ssl"
+    "enum4linux": {
+        "check": "enum4linux",
+        "install": ["apt-get", "install", "-y", "enum4linux"],
+        "install_alt": ["git", "clone", "https://github.com/CiscoCXSecurity/enum4linux.git", "/opt/enum4linux"],
+        "post_install_alt": ["ln", "-sf", "/opt/enum4linux/enum4linux.pl", "/usr/local/bin/enum4linux"],
+        "description": "SMB/Samba enumeration tool",
+        "pre_install": ["apt-get", "install", "-y", "smbclient", "ldap-utils", "perl"]
+    },
+    "smbclient": {
+        "check": "smbclient",
+        "install": ["apt-get", "install", "-y", "smbclient"],
+        "description": "SMB protocol client",
+        "pre_install": None
     },
     "testssl": {
-        "check": "testssl.sh",
+        "check": "testssl",
         "install": ["apt-get", "install", "-y", "testssl.sh"],
         "install_alt": ["git", "clone", "--depth", "1", "https://github.com/drwetter/testssl.sh.git", "/opt/testssl"],
-        "post_install_alt": ["ln", "-sf", "/opt/testssl/testssl.sh", "/usr/local/bin/testssl.sh"],
-        "description": "TLS/SSL testing tool",
-        "category": "ssl"
+        "post_install_alt": ["ln", "-sf", "/opt/testssl/testssl.sh", "/usr/local/bin/testssl"],
+        "description": "TLS/SSL encryption testing",
+        "pre_install": None
     },
-    
-    # === Network Tools ===
-    "dnsutils": {
-        "check": "dig",
-        "install": ["apt-get", "install", "-y", "dnsutils"],
-        "description": "DNS tools (dig, nslookup)",
-        "category": "network"
+    "hydra": {
+        "check": "hydra",
+        "install": ["apt-get", "install", "-y", "hydra"],
+        "description": "Network login brute-forcer",
+        "pre_install": None
+    },
+    "sqlmap": {
+        "check": "sqlmap",
+        "install": ["apt-get", "install", "-y", "sqlmap"],
+        "description": "SQL injection detection",
+        "pre_install": None
+    },
+    "wpscan": {
+        "check": "wpscan",
+        "install": ["gem", "install", "wpscan"],
+        "description": "WordPress vulnerability scanner",
+        "pre_install": ["apt-get", "install", "-y", "ruby", "ruby-dev", "build-essential", "libcurl4-openssl-dev", "zlib1g-dev"]
+    },
+    "ffuf": {
+        "check": "ffuf",
+        "install": ["apt-get", "install", "-y", "ffuf"],
+        "install_alt": ["go", "install", "github.com/ffuf/ffuf/v2@latest"],
+        "description": "Fast web fuzzer",
+        "pre_install": None
+    },
+    "masscan": {
+        "check": "masscan",
+        "install": ["apt-get", "install", "-y", "masscan"],
+        "description": "High-speed port scanner",
+        "pre_install": None
+    },
+    "tcpdump": {
+        "check": "tcpdump",
+        "install": ["apt-get", "install", "-y", "tcpdump"],
+        "description": "Packet analyzer",
+        "pre_install": None
     },
     "whois": {
         "check": "whois",
         "install": ["apt-get", "install", "-y", "whois"],
-        "description": "Domain/IP WHOIS lookup",
-        "category": "network"
+        "description": "Domain registration lookup",
+        "pre_install": None
     },
-    "iputils": {
-        "check": "ping",
-        "install": ["apt-get", "install", "-y", "iputils-ping"],
-        "description": "Ping utility",
-        "category": "network"
+    "dig": {
+        "check": "dig",
+        "install": ["apt-get", "install", "-y", "dnsutils"],
+        "description": "DNS lookup utility",
+        "pre_install": None
+    },
+    "curl": {
+        "check": "curl",
+        "install": ["apt-get", "install", "-y", "curl"],
+        "description": "HTTP client and transfer tool",
+        "pre_install": None
+    },
+    "wget": {
+        "check": "wget",
+        "install": ["apt-get", "install", "-y", "wget"],
+        "description": "Network file downloader",
+        "pre_install": None
+    },
+    "netcat": {
+        "check": "nc",
+        "install": ["apt-get", "install", "-y", "netcat-openbsd"],
+        "description": "Network connection utility",
+        "pre_install": None
     },
     "traceroute": {
         "check": "traceroute",
         "install": ["apt-get", "install", "-y", "traceroute"],
         "description": "Network path tracer",
-        "category": "network"
+        "pre_install": None
     },
-    "netcat": {
-        "check": "nc",
-        "install": ["apt-get", "install", "-y", "netcat-openbsd"],
-        "description": "Network utility (nc)",
-        "category": "network"
-    },
-    
-    # === Enumeration ===
-    "enum4linux": {
-        "check": "enum4linux",
-        "install": ["apt-get", "install", "-y", "enum4linux"],
-        "description": "SMB/Samba enumerator",
-        "category": "enum"
-    },
-    "smbclient": {
-        "check": "smbclient",
-        "install": ["apt-get", "install", "-y", "smbclient"],
-        "description": "SMB/CIFS client",
-        "category": "enum"
-    },
-    "snmp": {
-        "check": "snmpwalk",
-        "install": ["apt-get", "install", "-y", "snmp"],
-        "description": "SNMP tools (snmpwalk)",
-        "category": "enum"
-    },
-    "ldap-utils": {
-        "check": "ldapsearch",
-        "install": ["apt-get", "install", "-y", "ldap-utils"],
-        "description": "LDAP tools (ldapsearch)",
-        "category": "enum"
-    },
-    
-    # === Screenshot ===
-    "chromium": {
-        "check": "chromium",
-        "install": ["apt-get", "install", "-y", "chromium"],
-        "description": "Browser for screenshots",
-        "category": "screenshot"
-    },
-    
-    # === Utilities ===
-    "curl": {
-        "check": "curl",
-        "install": ["apt-get", "install", "-y", "curl"],
-        "description": "HTTP client",
-        "category": "util"
-    },
-    "wget": {
-        "check": "wget",
-        "install": ["apt-get", "install", "-y", "wget"],
-        "description": "File downloader",
-        "category": "util"
-    },
-    "git": {
-        "check": "git",
-        "install": ["apt-get", "install", "-y", "git"],
-        "description": "Version control (for alt installs)",
-        "category": "util"
-    },
-    "jq": {
-        "check": "jq",
-        "install": ["apt-get", "install", "-y", "jq"],
-        "description": "JSON processor",
-        "category": "util"
+    "openssl": {
+        "check": "openssl",
+        "install": ["apt-get", "install", "-y", "openssl"],
+        "description": "SSL/TLS toolkit",
+        "pre_install": None
     }
 }
 
@@ -616,6 +609,527 @@ class MicroHackAgent:
         
         return hosts
     
+    async def run_nikto_scan(self, command_id: str, command_data: dict) -> dict:
+        """Run a Nikto web vulnerability scan"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        # Check if nikto is installed
+        if not shutil.which("nikto"):
+            response["success"] = False
+            response["error"] = "nikto is not installed. Use the install_tool command to install it."
+            return response
+        
+        # Get options
+        port = command_data.get("port", 80)
+        ssl = command_data.get("ssl", False)
+        tuning = command_data.get("tuning", "")  # Nikto tuning options
+        project_id = command_data.get("project_id")
+        
+        # Build nikto command
+        cmd = ["nikto", "-h", target, "-p", str(port), "-Format", "json", "-o", "-"]
+        
+        if ssl or port == 443:
+            cmd.extend(["-ssl"])
+        
+        if tuning:
+            safe_tuning = tuning.replace(";", "").replace("&", "").replace("|", "")
+            cmd.extend(["-Tuning", safe_tuning])
+        
+        self.log(f"Running nikto scan: {' '.join(cmd)}")
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=1800  # 30 minute timeout for nikto
+            )
+            
+            output = stdout.decode("utf-8", errors="replace")
+            
+            # Parse JSON output if possible
+            findings = []
+            try:
+                nikto_data = json.loads(output)
+                if isinstance(nikto_data, list):
+                    for item in nikto_data:
+                        if "vulnerabilities" in item:
+                            findings.extend(item.get("vulnerabilities", []))
+                elif isinstance(nikto_data, dict):
+                    findings = nikto_data.get("vulnerabilities", [])
+            except json.JSONDecodeError:
+                # Fallback to raw output
+                findings = [{"raw_output": output}]
+            
+            response["data"] = {
+                "target": target,
+                "port": port,
+                "ssl": ssl,
+                "findings": findings,
+                "finding_count": len(findings),
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"Nikto scan complete: found {len(findings)} finding(s)")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Nikto scan timed out (30 minute limit)"
+            self.log("Nikto scan timed out", "ERROR")
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Nikto error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_dirb_scan(self, command_id: str, command_data: dict) -> dict:
+        """Run a Dirb directory brute force scan"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        # Check if dirb is installed
+        if not shutil.which("dirb"):
+            response["success"] = False
+            response["error"] = "dirb is not installed. Use the install_tool command to install it."
+            return response
+        
+        # Ensure URL has scheme
+        if not target.startswith(("http://", "https://")):
+            target = f"http://{target}"
+        
+        # Get options
+        wordlist = command_data.get("wordlist", "/usr/share/dirb/wordlists/common.txt")
+        extensions = command_data.get("extensions", "")
+        project_id = command_data.get("project_id")
+        
+        # Build dirb command
+        cmd = ["dirb", target, wordlist, "-o", "-", "-S"]  # -S for silent mode, -o - for stdout
+        
+        if extensions:
+            safe_ext = extensions.replace(";", "").replace("&", "").replace("|", "")
+            cmd.extend(["-X", safe_ext])
+        
+        self.log(f"Running dirb scan: {' '.join(cmd)}")
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=1800  # 30 minute timeout
+            )
+            
+            output = stdout.decode("utf-8", errors="replace")
+            
+            # Parse dirb output
+            directories = []
+            for line in output.split("\n"):
+                line = line.strip()
+                if line.startswith("+ ") or line.startswith("==> DIRECTORY: "):
+                    # Extract URL
+                    if line.startswith("+ "):
+                        parts = line[2:].split(" ")
+                        if parts:
+                            directories.append({
+                                "url": parts[0],
+                                "type": "file",
+                                "status": parts[1] if len(parts) > 1 else ""
+                            })
+                    else:
+                        url = line.replace("==> DIRECTORY: ", "").strip()
+                        directories.append({
+                            "url": url,
+                            "type": "directory"
+                        })
+            
+            response["data"] = {
+                "target": target,
+                "wordlist": wordlist,
+                "directories": directories,
+                "directory_count": len(directories),
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"Dirb scan complete: found {len(directories)} directory/file(s)")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Dirb scan timed out (30 minute limit)"
+            self.log("Dirb scan timed out", "ERROR")
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Dirb error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_sslscan(self, command_id: str, command_data: dict) -> dict:
+        """Run an SSL/TLS scan"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        # Check if sslscan is installed
+        if not shutil.which("sslscan"):
+            response["success"] = False
+            response["error"] = "sslscan is not installed. Use the install_tool command to install it."
+            return response
+        
+        # Get options
+        port = command_data.get("port", 443)
+        project_id = command_data.get("project_id")
+        
+        # Build sslscan command
+        target_with_port = f"{target}:{port}"
+        cmd = ["sslscan", "--xml=-", target_with_port]
+        
+        self.log(f"Running sslscan: {' '.join(cmd)}")
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=120  # 2 minute timeout for sslscan
+            )
+            
+            xml_output = stdout.decode("utf-8", errors="replace")
+            
+            # Parse XML output
+            ssl_info = self.parse_sslscan_xml(xml_output)
+            
+            response["data"] = {
+                "target": target,
+                "port": port,
+                "ssl_info": ssl_info,
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"SSLscan complete")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "SSLscan timed out (2 minute limit)"
+            self.log("SSLscan timed out", "ERROR")
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"SSLscan error: {e}", "ERROR")
+        
+        return response
+    
+    def parse_sslscan_xml(self, xml_output: str) -> dict:
+        """Parse sslscan XML output"""
+        import xml.etree.ElementTree as ET
+        
+        result = {
+            "protocols": [],
+            "ciphers": [],
+            "certificate": {},
+            "vulnerabilities": []
+        }
+        
+        try:
+            root = ET.fromstring(xml_output)
+            
+            # Parse SSL/TLS versions
+            for proto in root.findall(".//protocol"):
+                result["protocols"].append({
+                    "type": proto.get("type"),
+                    "version": proto.get("version"),
+                    "enabled": proto.get("enabled") == "1"
+                })
+            
+            # Parse ciphers
+            for cipher in root.findall(".//cipher"):
+                result["ciphers"].append({
+                    "status": cipher.get("status"),
+                    "sslversion": cipher.get("sslversion"),
+                    "bits": cipher.get("bits"),
+                    "cipher": cipher.get("cipher"),
+                    "strength": cipher.get("strength", "unknown")
+                })
+            
+            # Parse certificate info
+            cert = root.find(".//certificate")
+            if cert is not None:
+                sig_algo = cert.find("signature-algorithm")
+                pk = cert.find("pk")
+                subject = cert.find("subject")
+                issuer = cert.find("issuer")
+                
+                result["certificate"] = {
+                    "signature_algorithm": sig_algo.text if sig_algo is not None else None,
+                    "pk_type": pk.get("type") if pk is not None else None,
+                    "pk_bits": pk.get("bits") if pk is not None else None,
+                    "subject": subject.text if subject is not None else None,
+                    "issuer": issuer.text if issuer is not None else None
+                }
+                
+                # Check for self-signed
+                self_signed = cert.find("self-signed")
+                if self_signed is not None and self_signed.text == "true":
+                    result["vulnerabilities"].append("Self-signed certificate")
+                
+                # Check expiry
+                not_valid_after = cert.find("not-valid-after")
+                if not_valid_after is not None:
+                    result["certificate"]["expires"] = not_valid_after.text
+            
+            # Check for vulnerabilities
+            heartbleed = root.find(".//heartbleed")
+            if heartbleed is not None and heartbleed.get("vulnerable") == "1":
+                result["vulnerabilities"].append("Heartbleed (CVE-2014-0160)")
+            
+        except ET.ParseError as e:
+            self.log(f"XML parse error: {e}", "ERROR")
+        except Exception as e:
+            self.log(f"Error parsing sslscan output: {e}", "ERROR")
+        
+        return result
+    
+    async def run_gobuster_scan(self, command_id: str, command_data: dict) -> dict:
+        """Run a Gobuster directory/DNS scan"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        # Check if gobuster is installed
+        if not shutil.which("gobuster"):
+            response["success"] = False
+            response["error"] = "gobuster is not installed. Use the install_tool command to install it."
+            return response
+        
+        # Ensure URL has scheme
+        if not target.startswith(("http://", "https://")):
+            target = f"http://{target}"
+        
+        # Get options
+        mode = command_data.get("mode", "dir")  # dir, dns, vhost
+        wordlist = command_data.get("wordlist", "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt")
+        extensions = command_data.get("extensions", "")
+        threads = command_data.get("threads", 10)
+        project_id = command_data.get("project_id")
+        
+        # Build gobuster command
+        cmd = ["gobuster", mode, "-u", target, "-w", wordlist, "-t", str(threads), "-q", "--no-progress"]
+        
+        if extensions and mode == "dir":
+            safe_ext = extensions.replace(";", "").replace("&", "").replace("|", "")
+            cmd.extend(["-x", safe_ext])
+        
+        self.log(f"Running gobuster scan: {' '.join(cmd)}")
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=1800  # 30 minute timeout
+            )
+            
+            output = stdout.decode("utf-8", errors="replace")
+            
+            # Parse gobuster output
+            entries = []
+            for line in output.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                # Format: /path (Status: 200) [Size: 1234]
+                if "(Status:" in line:
+                    parts = line.split(" ")
+                    if parts:
+                        path = parts[0]
+                        status = ""
+                        size = ""
+                        for i, p in enumerate(parts):
+                            if p == "(Status:":
+                                status = parts[i + 1].rstrip(")")
+                            if p == "[Size:":
+                                size = parts[i + 1].rstrip("]")
+                        entries.append({
+                            "path": path,
+                            "status": status,
+                            "size": size
+                        })
+            
+            response["data"] = {
+                "target": target,
+                "mode": mode,
+                "wordlist": wordlist,
+                "entries": entries,
+                "entry_count": len(entries),
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"Gobuster scan complete: found {len(entries)} entries")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Gobuster scan timed out (30 minute limit)"
+            self.log("Gobuster scan timed out", "ERROR")
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Gobuster error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_whatweb_scan(self, command_id: str, command_data: dict) -> dict:
+        """Run a WhatWeb web technology fingerprinting scan"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        # Check if whatweb is installed
+        if not shutil.which("whatweb"):
+            response["success"] = False
+            response["error"] = "whatweb is not installed. Use the install_tool command to install it."
+            return response
+        
+        # Ensure URL has scheme
+        if not target.startswith(("http://", "https://")):
+            target = f"http://{target}"
+        
+        # Get options
+        aggression = command_data.get("aggression", 1)  # 1-4
+        project_id = command_data.get("project_id")
+        
+        # Build whatweb command
+        cmd = ["whatweb", "-a", str(aggression), "--log-json=-", target]
+        
+        self.log(f"Running whatweb scan: {' '.join(cmd)}")
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=120  # 2 minute timeout
+            )
+            
+            output = stdout.decode("utf-8", errors="replace")
+            
+            # Parse JSON output
+            technologies = []
+            try:
+                for line in output.strip().split("\n"):
+                    if line:
+                        data = json.loads(line)
+                        if "plugins" in data:
+                            for plugin, info in data.get("plugins", {}).items():
+                                tech = {"name": plugin}
+                                if isinstance(info, dict):
+                                    tech["version"] = info.get("version", [None])[0] if info.get("version") else None
+                                technologies.append(tech)
+            except json.JSONDecodeError:
+                technologies = [{"raw_output": output}]
+            
+            response["data"] = {
+                "target": target,
+                "technologies": technologies,
+                "technology_count": len(technologies),
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"WhatWeb scan complete: found {len(technologies)} technologies")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "WhatWeb scan timed out (2 minute limit)"
+            self.log("WhatWeb scan timed out", "ERROR")
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"WhatWeb error: {e}", "ERROR")
+        
+        return response
+    
     async def check_tools_status(self) -> dict:
         """Check which tools are installed and available"""
         tools_status = {}
@@ -707,6 +1221,16 @@ class MicroHackAgent:
                 stderr=asyncio.subprocess.PIPE
             )
             await asyncio.wait_for(update_process.communicate(), timeout=120)
+            
+            # Run pre-install dependencies if defined
+            if tool_info.get("pre_install"):
+                self.log(f"Installing dependencies: {' '.join(tool_info['pre_install'])}")
+                pre_process = await asyncio.create_subprocess_exec(
+                    *tool_info["pre_install"],
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await asyncio.wait_for(pre_process.communicate(), timeout=180)
             
             # Try primary install method
             self.log(f"Running: {' '.join(tool_info['install'])}")
@@ -917,13 +1441,46 @@ class MicroHackAgent:
                 response = await self.run_nmap_scan(command_id, command_data)
                 self.log(f"Nmap scan complete, success: {response.get('success')}")
             
+            elif command == "nikto":
+                # Run nikto web vulnerability scan
+                self.log(f"Starting nikto scan for command_id: {command_id}")
+                response = await self.run_nikto_scan(command_id, command_data)
+                self.log(f"Nikto scan complete, success: {response.get('success')}")
+            
+            elif command == "dirb":
+                # Run dirb directory scan
+                self.log(f"Starting dirb scan for command_id: {command_id}")
+                response = await self.run_dirb_scan(command_id, command_data)
+                self.log(f"Dirb scan complete, success: {response.get('success')}")
+            
+            elif command == "sslscan":
+                # Run SSL/TLS scan
+                self.log(f"Starting sslscan for command_id: {command_id}")
+                response = await self.run_sslscan(command_id, command_data)
+                self.log(f"SSLscan complete, success: {response.get('success')}")
+            
+            elif command == "gobuster":
+                # Run gobuster directory scan
+                self.log(f"Starting gobuster scan for command_id: {command_id}")
+                response = await self.run_gobuster_scan(command_id, command_data)
+                self.log(f"Gobuster scan complete, success: {response.get('success')}")
+            
+            elif command == "whatweb":
+                # Run whatweb fingerprinting scan
+                self.log(f"Starting whatweb scan for command_id: {command_id}")
+                response = await self.run_whatweb_scan(command_id, command_data)
+                self.log(f"WhatWeb scan complete, success: {response.get('success')}")
+            
             elif command == "capabilities":
                 # Return what this agent can do
                 response["data"] = {
-                    "commands": ["ping", "info", "echo", "nmap", "capabilities", "install_tool", "check_tools", "update_agent"],
+                    "commands": ["ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "capabilities", "install_tool", "check_tools", "update_agent"],
                     "nmap_available": shutil.which("nmap") is not None,
                     "nikto_available": shutil.which("nikto") is not None,
                     "dirb_available": shutil.which("dirb") is not None,
+                    "sslscan_available": shutil.which("sslscan") is not None,
+                    "gobuster_available": shutil.which("gobuster") is not None,
+                    "whatweb_available": shutil.which("whatweb") is not None,
                     "version": VERSION
                 }
             
