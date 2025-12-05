@@ -55,135 +55,185 @@ TOOL_INSTALL_COMMANDS = {
     "nmap": {
         "check": "nmap",
         "install": ["apt-get", "install", "-y", "nmap"],
+        "uninstall": ["apt-get", "remove", "-y", "nmap"],
         "description": "Network scanner",
+        "size": "5.2 MB",
         "pre_install": None
     },
     "nikto": {
         "check": "nikto",
         # nikto is in Debian, but might need to enable non-free or use git
         "install": ["apt-get", "install", "-y", "nikto"],
+        "uninstall": ["apt-get", "remove", "-y", "nikto"],
         "install_alt": ["git", "clone", "https://github.com/sullo/nikto.git", "/opt/nikto"],
         "post_install_alt": ["ln", "-sf", "/opt/nikto/program/nikto.pl", "/usr/local/bin/nikto"],
         "description": "Web server scanner",
+        "size": "2.1 MB",
         "pre_install": None
     },
     "dirb": {
         "check": "dirb",
         "install": ["apt-get", "install", "-y", "dirb"],
+        "uninstall": ["apt-get", "remove", "-y", "dirb"],
         "description": "Web content scanner",
+        "size": "1.8 MB",
         "pre_install": None
     },
     "gobuster": {
         "check": "gobuster",
         "install": ["apt-get", "install", "-y", "gobuster"],
+        "uninstall": ["apt-get", "remove", "-y", "gobuster"],
         "description": "Directory/file brute-forcer",
+        "size": "7.5 MB",
         "pre_install": None
     },
     "whatweb": {
         "check": "whatweb",
         "install": ["apt-get", "install", "-y", "whatweb"],
+        "uninstall": ["apt-get", "remove", "-y", "whatweb"],
         "description": "Web technology scanner",
+        "size": "12 MB",
         "pre_install": None
     },
     "enum4linux": {
         "check": "enum4linux",
         "install": ["apt-get", "install", "-y", "enum4linux"],
+        "uninstall": ["apt-get", "remove", "-y", "enum4linux"],
         "install_alt": ["git", "clone", "https://github.com/CiscoCXSecurity/enum4linux.git", "/opt/enum4linux"],
         "post_install_alt": ["ln", "-sf", "/opt/enum4linux/enum4linux.pl", "/usr/local/bin/enum4linux"],
         "description": "SMB/Samba enumeration tool",
+        "size": "0.5 MB",
         "pre_install": ["apt-get", "install", "-y", "smbclient", "ldap-utils", "perl"]
     },
     "smbclient": {
         "check": "smbclient",
         "install": ["apt-get", "install", "-y", "smbclient"],
+        "uninstall": ["apt-get", "remove", "-y", "smbclient"],
         "description": "SMB protocol client",
+        "size": "8.4 MB",
         "pre_install": None
     },
     "testssl": {
         "check": "testssl",
         "install": ["apt-get", "install", "-y", "testssl.sh"],
+        "uninstall": ["apt-get", "remove", "-y", "testssl.sh"],
         "install_alt": ["git", "clone", "--depth", "1", "https://github.com/drwetter/testssl.sh.git", "/opt/testssl"],
         "post_install_alt": ["ln", "-sf", "/opt/testssl/testssl.sh", "/usr/local/bin/testssl"],
         "description": "TLS/SSL encryption testing",
+        "size": "4.2 MB",
         "pre_install": None
     },
     "hydra": {
         "check": "hydra",
         "install": ["apt-get", "install", "-y", "hydra"],
+        "uninstall": ["apt-get", "remove", "-y", "hydra"],
         "description": "Network login brute-forcer",
+        "size": "3.1 MB",
         "pre_install": None
     },
     "sqlmap": {
         "check": "sqlmap",
         "install": ["apt-get", "install", "-y", "sqlmap"],
+        "uninstall": ["apt-get", "remove", "-y", "sqlmap"],
         "description": "SQL injection detection",
+        "size": "15 MB",
         "pre_install": None
     },
     "wpscan": {
         "check": "wpscan",
         "install": ["gem", "install", "wpscan"],
+        "uninstall": ["gem", "uninstall", "-x", "wpscan"],
         "description": "WordPress vulnerability scanner",
+        "size": "25 MB",
         "pre_install": ["apt-get", "install", "-y", "ruby", "ruby-dev", "build-essential", "libcurl4-openssl-dev", "zlib1g-dev"]
     },
     "ffuf": {
         "check": "ffuf",
         "install": ["apt-get", "install", "-y", "ffuf"],
+        "uninstall": ["apt-get", "remove", "-y", "ffuf"],
         "install_alt": ["go", "install", "github.com/ffuf/ffuf/v2@latest"],
         "description": "Fast web fuzzer",
+        "size": "8.3 MB",
         "pre_install": None
     },
     "masscan": {
         "check": "masscan",
         "install": ["apt-get", "install", "-y", "masscan"],
+        "uninstall": ["apt-get", "remove", "-y", "masscan"],
         "description": "High-speed port scanner",
+        "size": "1.2 MB",
         "pre_install": None
     },
     "tcpdump": {
         "check": "tcpdump",
         "install": ["apt-get", "install", "-y", "tcpdump"],
+        "uninstall": ["apt-get", "remove", "-y", "tcpdump"],
         "description": "Packet analyzer",
+        "size": "1.5 MB",
         "pre_install": None
     },
     "whois": {
         "check": "whois",
         "install": ["apt-get", "install", "-y", "whois"],
+        "uninstall": ["apt-get", "remove", "-y", "whois"],
         "description": "Domain registration lookup",
+        "size": "0.3 MB",
         "pre_install": None
     },
     "dig": {
         "check": "dig",
         "install": ["apt-get", "install", "-y", "dnsutils"],
+        "uninstall": ["apt-get", "remove", "-y", "dnsutils"],
         "description": "DNS lookup utility",
+        "size": "2.8 MB",
         "pre_install": None
     },
     "curl": {
         "check": "curl",
         "install": ["apt-get", "install", "-y", "curl"],
+        "uninstall": ["apt-get", "remove", "-y", "curl"],
         "description": "HTTP client and transfer tool",
+        "size": "0.8 MB",
         "pre_install": None
     },
     "wget": {
         "check": "wget",
         "install": ["apt-get", "install", "-y", "wget"],
+        "uninstall": ["apt-get", "remove", "-y", "wget"],
         "description": "Network file downloader",
+        "size": "3.2 MB",
         "pre_install": None
     },
     "netcat": {
         "check": "nc",
         "install": ["apt-get", "install", "-y", "netcat-openbsd"],
+        "uninstall": ["apt-get", "remove", "-y", "netcat-openbsd"],
         "description": "Network connection utility",
+        "size": "0.1 MB",
         "pre_install": None
     },
     "traceroute": {
         "check": "traceroute",
         "install": ["apt-get", "install", "-y", "traceroute"],
+        "uninstall": ["apt-get", "remove", "-y", "traceroute"],
         "description": "Network path tracer",
+        "size": "0.2 MB",
         "pre_install": None
     },
     "openssl": {
         "check": "openssl",
         "install": ["apt-get", "install", "-y", "openssl"],
+        "uninstall": ["apt-get", "remove", "-y", "openssl"],
         "description": "SSL/TLS toolkit",
+        "size": "1.4 MB",
+        "pre_install": None
+    },
+    "sslscan": {
+        "check": "sslscan",
+        "install": ["apt-get", "install", "-y", "sslscan"],
+        "uninstall": ["apt-get", "remove", "-y", "sslscan"],
+        "description": "SSL/TLS vulnerability scanner",
+        "size": "0.6 MB",
         "pre_install": None
     }
 }
@@ -1298,7 +1348,8 @@ class MicroHackAgent:
             tools_status[tool_name] = {
                 "installed": is_installed,
                 "version": version,
-                "description": tool_info["description"]
+                "description": tool_info["description"],
+                "size": tool_info.get("size", "Unknown")
             }
         
         return {
@@ -1449,6 +1500,96 @@ class MicroHackAgent:
             response["success"] = False
             response["error"] = str(e)
             self.log(f"Install error: {e}", "ERROR")
+        
+        return response
+    
+    async def uninstall_tool(self, command_id: str, tool_name: str) -> dict:
+        """Uninstall a tool from the agent system"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        if not tool_name:
+            response["success"] = False
+            response["error"] = "No tool name specified"
+            return response
+        
+        if tool_name not in TOOL_INSTALL_COMMANDS:
+            response["success"] = False
+            response["error"] = f"Unknown tool: {tool_name}. Supported: {list(TOOL_INSTALL_COMMANDS.keys())}"
+            return response
+        
+        tool_info = TOOL_INSTALL_COMMANDS[tool_name]
+        
+        # Check if tool is installed
+        if not shutil.which(tool_info["check"]):
+            response["data"] = {
+                "tool": tool_name,
+                "status": "not_installed",
+                "message": f"{tool_name} is not installed"
+            }
+            return response
+        
+        # Check if we have root/sudo access
+        is_root = self._is_root()
+        
+        if not is_root:
+            response["success"] = False
+            response["error"] = "Agent must run as root to uninstall tools. Run with sudo or as root user."
+            return response
+        
+        # Check if uninstall command is available
+        if not tool_info.get("uninstall"):
+            response["success"] = False
+            response["error"] = f"Uninstall not supported for {tool_name}"
+            return response
+        
+        self.log(f"Uninstalling {tool_name}...")
+        
+        try:
+            # Run uninstall command
+            self.log(f"Running: {' '.join(tool_info['uninstall'])}")
+            process = await asyncio.create_subprocess_exec(
+                *tool_info["uninstall"],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=120  # 2 minute timeout
+            )
+            
+            if process.returncode != 0:
+                error_msg = stderr.decode("utf-8", errors="replace")
+                response["success"] = False
+                response["error"] = f"Uninstall failed: {error_msg}"
+                self.log(f"Uninstall failed: {error_msg}", "ERROR")
+                return response
+            
+            # Verify uninstallation
+            if not shutil.which(tool_info["check"]):
+                response["data"] = {
+                    "tool": tool_name,
+                    "status": "uninstalled",
+                    "message": f"{tool_name} uninstalled successfully"
+                }
+                self.log(f"{tool_name} uninstalled successfully")
+            else:
+                response["success"] = False
+                response["error"] = f"{tool_name} uninstall command succeeded but tool still found in PATH"
+                
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Uninstall timed out (2 minute limit)"
+            self.log(f"Uninstall timed out", "ERROR")
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Uninstall error: {e}", "ERROR")
         
         return response
     
@@ -1608,7 +1749,7 @@ class MicroHackAgent:
             elif command == "capabilities":
                 # Return what this agent can do
                 response["data"] = {
-                    "commands": ["ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "capabilities", "install_tool", "check_tools", "update_agent"],
+                    "commands": ["ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent"],
                     "nmap_available": shutil.which("nmap") is not None,
                     "nikto_available": shutil.which("nikto") is not None,
                     "dirb_available": shutil.which("dirb") is not None,
@@ -1626,6 +1767,11 @@ class MicroHackAgent:
                 # Install a tool
                 tool_name = command_data.get("tool")
                 response = await self.install_tool(command_id, tool_name)
+            
+            elif command == "uninstall_tool":
+                # Uninstall a tool
+                tool_name = command_data.get("tool")
+                response = await self.uninstall_tool(command_id, tool_name)
             
             elif command == "update_agent":
                 # Self-update the agent
