@@ -2,52 +2,169 @@
 """
 micro-hack remote agent
 
-A lightweight agent that connects to the micro-hack server via WebSocket
-and executes commands on demand (including nmap scans).
+A lightweight, self-bootstrapping agent that connects to the micro-hack server 
+via WebSocket and executes commands on demand (including nmap scans).
+
+Features:
+- Auto-installs its own dependencies (websockets, psutil)
+- Auto-updates to latest version on startup
+- Zero external dependencies required (just Python 3.7+)
 
 Usage:
     Set environment variables:
     - MICROHACK_SERVER_URL: WebSocket URL (e.g., ws://localhost:8000 or wss://app.micro-hack.nl)
     - MICROHACK_API_KEY: Your agent API key from micro-hack
     
-    Then run:
-    python agent.py
+    Run directly:
+    curl -sL https://raw.githubusercontent.com/cheshirecat78/micro-hack-agent/main/agent.py | \
+      MICROHACK_SERVER_URL=wss://app.micro-hack.nl MICROHACK_API_KEY=your-key python3 -
 """
 import os
 import sys
 import json
-import uuid
 import socket
 import platform
-import asyncio
-import signal
 import subprocess
-import shutil
 from datetime import datetime
-from typing import Optional
+
+# =============================================================================
+# SELF-BOOTSTRAPPING: Install dependencies if missing
+# =============================================================================
+
+def install(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
 try:
     import websockets
-    from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 except ImportError:
-    print("ERROR: websockets library not installed. Run: pip install websockets")
-    sys.exit(1)
+    install("websockets")
+    import websockets
 
 try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
-    print("WARNING: psutil library not installed. System metrics will not be available. Run: pip install psutil")
-    PSUTIL_AVAILABLE = False
+    try:
+        install("psutil")
+        import psutil
+        PSUTIL_AVAILABLE = True
+    except:
+        PSUTIL_AVAILABLE = False
 
-# Agent version
-VERSION = "1.3.3"
+# =============================================================================
+# IMPORTS (now safe after bootstrap)
+# =============================================================================
+
+import uuid
+import asyncio
+import signal
+import shutil
+from typing import Optional
+
+# Import websocket exceptions
+from websockets.exceptions import ConnectionClosed, InvalidStatusCode
+
+# =============================================================================
+# AGENT VERSION & AUTO-UPDATE
+# =============================================================================
+
+VERSION = "1.7.1"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
     "MICROHACK_AGENT_UPDATE_URL", 
     "https://raw.githubusercontent.com/cheshirecat78/micro-hack-agent/main/agent.py"
 )
+
+# Skip auto-update flag (for development)
+SKIP_AUTO_UPDATE = os.environ.get("MICROHACK_SKIP_UPDATE", "").lower() in ("1", "true", "yes")
+
+
+def auto_update_on_startup():
+    """
+    Check for updates and restart with new version if available.
+    This runs BEFORE the agent starts, ensuring we always run the latest version.
+    """
+    if SKIP_AUTO_UPDATE:
+        print("[UPDATE] Skipping auto-update (MICROHACK_SKIP_UPDATE is set)", flush=True)
+        return
+    
+    # Don't update if running from stdin (piped execution)
+    if not os.path.isfile(__file__) or __file__ == '<stdin>':
+        print("[UPDATE] Running from stdin/pipe, skipping auto-update", flush=True)
+        return
+    
+    print(f"[UPDATE] Checking for updates (current: v{VERSION})...", flush=True)
+    
+    try:
+        import urllib.request
+        import tempfile
+        
+        # Download latest version
+        with urllib.request.urlopen(AGENT_UPDATE_URL, timeout=15) as resp:
+            new_code = resp.read().decode('utf-8')
+        
+        # Extract version from new code
+        new_version = None
+        for line in new_code.split('\n'):
+            if line.strip().startswith('VERSION = '):
+                # Handle both VERSION = "x.y.z" and VERSION = 'x.y.z'
+                try:
+                    new_version = line.split('"')[1]
+                except IndexError:
+                    new_version = line.split("'")[1]
+                break
+        
+        if not new_version:
+            print("[UPDATE] Could not parse version from remote, skipping update", flush=True)
+            return
+        
+        # Compare versions (simple string comparison works for semantic versioning)
+        if new_version == VERSION:
+            print(f"[UPDATE] Already running latest version (v{VERSION})", flush=True)
+            return
+        
+        # Check if newer (compare version tuples)
+        def version_tuple(v):
+            return tuple(map(int, v.split('.')))
+        
+        try:
+            if version_tuple(new_version) <= version_tuple(VERSION):
+                print(f"[UPDATE] Local version (v{VERSION}) is same or newer than remote (v{new_version})", flush=True)
+                return
+        except ValueError:
+            # If version parsing fails, do string comparison
+            pass
+        
+        print(f"[UPDATE] New version available: v{VERSION} → v{new_version}", flush=True)
+        
+        # Get current script path
+        current_script = os.path.abspath(__file__)
+        
+        # Backup current script
+        backup_path = current_script + ".backup"
+        shutil.copy2(current_script, backup_path)
+        print(f"[UPDATE] Backed up to {backup_path}", flush=True)
+        
+        # Write new code
+        with open(current_script, 'w') as f:
+            f.write(new_code)
+        
+        print(f"[UPDATE] Updated to v{new_version}, restarting...", flush=True)
+        
+        # Restart the agent with the new code
+        os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
+        
+    except Exception as e:
+        print(f"[UPDATE] Update check failed: {e} (continuing with current version)", flush=True)
+
+
+# Run auto-update before anything else
+auto_update_on_startup()
+
+# =============================================================================
+# TOOL DEFINITIONS
+# =============================================================================
 
 # Supported tools and their install commands (Debian/Ubuntu based)
 # Note: Some tools require additional setup or alternative installation methods
@@ -235,12 +352,54 @@ TOOL_INSTALL_COMMANDS = {
         "description": "SSL/TLS vulnerability scanner",
         "size": "0.6 MB",
         "pre_install": None
+    },
+    "ssh-audit": {
+        "check": "ssh-audit",
+        "install": ["pip3", "install", "ssh-audit"],
+        "uninstall": ["pip3", "uninstall", "-y", "ssh-audit"],
+        "description": "SSH server security auditing",
+        "size": "0.5 MB",
+        "pre_install": ["apt-get", "install", "-y", "python3-pip"]
+    },
+    "holehe": {
+        "check": "holehe",
+        "install": ["pip3", "install", "holehe"],
+        "uninstall": ["pip3", "uninstall", "-y", "holehe"],
+        "description": "Email OSINT - check email registrations",
+        "size": "2 MB",
+        "pre_install": ["apt-get", "install", "-y", "python3-pip"]
+    },
+    "phoneinfoga": {
+        "check": "phoneinfoga",
+        "install": ["bash", "-c", "wget -qO /tmp/phoneinfoga.tar.gz https://github.com/sundowndev/phoneinfoga/releases/latest/download/phoneinfoga_Linux_x86_64.tar.gz && tar -xzf /tmp/phoneinfoga.tar.gz -C /usr/local/bin phoneinfoga && chmod +x /usr/local/bin/phoneinfoga && rm /tmp/phoneinfoga.tar.gz"],
+        "uninstall": ["rm", "-f", "/usr/local/bin/phoneinfoga"],
+        "description": "Phone number OSINT tool",
+        "size": "15 MB",
+        "pre_install": ["apt-get", "install", "-y", "wget"]
+    },
+    "maigret": {
+        "check": "maigret",
+        "install": ["pip3", "install", "maigret"],
+        "uninstall": ["pip3", "uninstall", "-y", "maigret"],
+        "description": "Username OSINT - check social networks",
+        "size": "10 MB",
+        "pre_install": ["apt-get", "install", "-y", "python3-pip"]
+    },
+    "chromium": {
+        "check": "chromium",
+        "install": ["apt-get", "install", "-y", "chromium"],
+        "uninstall": ["apt-get", "remove", "-y", "chromium"],
+        "install_alt": ["apt-get", "install", "-y", "chromium-browser"],
+        "description": "Headless browser for screenshots",
+        "size": "150 MB",
+        "pre_install": None
     }
 }
 
 # Configuration from environment
 SERVER_URL = os.environ.get("MICROHACK_SERVER_URL", "ws://localhost:8000")
 API_KEY = os.environ.get("MICROHACK_API_KEY", "")
+IS_LOCAL_AGENT = os.environ.get("MICROHACK_IS_LOCAL", "false").lower() in ("true", "1", "yes")
 
 # Reconnection settings
 RECONNECT_DELAY = 5  # seconds
@@ -260,6 +419,15 @@ class MicroHackAgent:
         self.running = False
         self.connected = False
         self.reconnect_delay = RECONNECT_DELAY
+        
+        # Command queue for concurrent processing
+        self._command_queue: asyncio.Queue = None  # Created in run()
+        self._num_workers = 4  # Number of concurrent command workers
+        self._worker_tasks: list = []
+        
+        # Installation lock - only one tool can be installed at a time
+        self._install_lock: asyncio.Lock = None  # Created in run()
+        self._installing_tool: str = None  # Currently installing tool name
         
         # Gather system info
         self.hostname = socket.gethostname()
@@ -465,6 +633,8 @@ class MicroHackAgent:
         if not self.ws:
             return
         
+        # Note: is_local is informational only - the server ignores it for security
+        # The is_local status is set by admins via the web UI, not by the agent
         registration = {
             "type": "register",
             "data": {
@@ -476,13 +646,14 @@ class MicroHackAgent:
                 "version": VERSION,
                 "os": self.os_info,
                 "network_interfaces": self.network_interfaces,
-                "capabilities": ["ping", "info", "nmap", "install_tool", "check_tools", "update_agent"]
+                "capabilities": ["ping", "info", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "install_tool", "check_tools", "update_agent"]
             }
         }
         
         await self.ws.send(json.dumps(registration))
+        local_str = " [LOCAL]" if IS_LOCAL_AGENT else ""
         loc_str = f" @ {self.location.get('city')}, {self.location.get('country')}" if self.location else ""
-        self.log(f"Registered as {self.hostname} ({self.os_info}){loc_str}")
+        self.log(f"Registered as {self.hostname} ({self.os_info}){loc_str}{local_str}")
     
     def get_system_metrics(self) -> dict:
         """Collect system metrics using psutil"""
@@ -584,13 +755,151 @@ class MicroHackAgent:
             pass  # Silent acknowledgment
         
         elif msg_type == "command":
-            await self.handle_command(data)
+            # Queue command for worker processing (enables concurrency)
+            if self._command_queue:
+                await self._command_queue.put(data)
+            else:
+                # Fallback to direct execution if queue not ready
+                await self.handle_command(data)
         
         elif msg_type == "error":
             self.log(f"Server error: {data.get('message')}", "ERROR")
         
         else:
             self.log(f"Unknown message type: {msg_type}", "WARNING")
+    
+    async def run_host_ping(self, command_id: str, command_data: dict) -> dict:
+        """
+        Run a ping command against a target host.
+        
+        command_data should contain:
+        - target: IP or hostname to ping
+        - count: number of ping packets (optional, default: 10)
+        """
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        count = command_data.get("count", 10)
+        if count > 100:
+            count = 100  # Limit to 100 pings
+        
+        # Build ping command based on OS
+        is_windows = platform.system().lower() == "windows"
+        if is_windows:
+            cmd = ["ping", "-n", str(count), target]
+        else:
+            cmd = ["ping", "-c", str(count), target]
+        
+        self.log(f"Running ping: {' '.join(cmd)}")
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=120  # 2 minute timeout
+            )
+            
+            output = stdout.decode("utf-8", errors="replace")
+            
+            # Parse ping output
+            result = self.parse_ping_output(output, is_windows)
+            result["target"] = target
+            result["count"] = count
+            result["raw_output"] = output
+            result["pinged_at"] = datetime.utcnow().isoformat()
+            result["agent_id"] = self.agent_id
+            
+            response["data"] = result
+            
+            if result.get("packet_loss", 100) < 100:
+                response["data"]["is_alive"] = True
+                self.log(f"Ping complete: {target} is reachable, avg latency {result.get('avg_latency', 'N/A')}ms")
+            else:
+                response["data"]["is_alive"] = False
+                self.log(f"Ping complete: {target} is not reachable")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Ping timed out"
+            self.log("Ping timed out", "ERROR")
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Ping error: {e}", "ERROR")
+        
+        return response
+    
+    def parse_ping_output(self, output: str, is_windows: bool) -> dict:
+        """Parse ping output to extract statistics"""
+        result = {
+            "packets_sent": 0,
+            "packets_received": 0,
+            "packet_loss": 100.0,
+            "min_latency": None,
+            "max_latency": None,
+            "avg_latency": None
+        }
+        
+        import re
+        
+        try:
+            if is_windows:
+                # Windows format: Packets: Sent = 10, Received = 10, Lost = 0 (0% loss)
+                packets_match = re.search(r'Sent = (\d+), Received = (\d+), Lost = (\d+)', output)
+                if packets_match:
+                    result["packets_sent"] = int(packets_match.group(1))
+                    result["packets_received"] = int(packets_match.group(2))
+                    lost = int(packets_match.group(3))
+                    if result["packets_sent"] > 0:
+                        result["packet_loss"] = (lost / result["packets_sent"]) * 100
+                
+                # Windows format: Minimum = 1ms, Maximum = 5ms, Average = 2ms
+                latency_match = re.search(r'Minimum = (\d+)ms, Maximum = (\d+)ms, Average = (\d+)ms', output)
+                if latency_match:
+                    result["min_latency"] = float(latency_match.group(1))
+                    result["max_latency"] = float(latency_match.group(2))
+                    result["avg_latency"] = float(latency_match.group(3))
+            else:
+                # Unix format: 10 packets transmitted, 10 received, 0% packet loss
+                packets_match = re.search(r'(\d+) packets transmitted, (\d+) (?:packets )?received', output)
+                if packets_match:
+                    result["packets_sent"] = int(packets_match.group(1))
+                    result["packets_received"] = int(packets_match.group(2))
+                    if result["packets_sent"] > 0:
+                        result["packet_loss"] = ((result["packets_sent"] - result["packets_received"]) / result["packets_sent"]) * 100
+                
+                # Unix format: rtt min/avg/max/mdev = 0.028/0.036/0.050/0.007 ms
+                latency_match = re.search(r'rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)/[\d.]+ ms', output)
+                if latency_match:
+                    result["min_latency"] = float(latency_match.group(1))
+                    result["avg_latency"] = float(latency_match.group(2))
+                    result["max_latency"] = float(latency_match.group(3))
+                else:
+                    # Alternative format: min/avg/max = 1.234/2.345/3.456 ms
+                    latency_match = re.search(r'min/avg/max = ([\d.]+)/([\d.]+)/([\d.]+)', output)
+                    if latency_match:
+                        result["min_latency"] = float(latency_match.group(1))
+                        result["avg_latency"] = float(latency_match.group(2))
+                        result["max_latency"] = float(latency_match.group(3))
+        except Exception as e:
+            self.log(f"Error parsing ping output: {e}", "WARNING")
+        
+        return result
     
     async def run_nmap_scan(self, command_id: str, command_data: dict) -> dict:
         """
@@ -609,12 +918,14 @@ class MicroHackAgent:
             "data": {}
         }
         
-        # Check if nmap is available
-        nmap_path = shutil.which("nmap")
-        if not nmap_path:
+        # Check if nmap is available, auto-install if needed
+        installed, install_msg = await self.ensure_tool_installed("nmap")
+        if not installed:
             response["success"] = False
-            response["error"] = "nmap is not installed on this agent"
+            response["error"] = install_msg
             return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "nmap"
         
         target = command_data.get("target")
         if not target:
@@ -631,20 +942,25 @@ class MicroHackAgent:
         # Always use -oX - for XML output to stdout
         cmd = ["nmap", "-oX", "-"]
         
-        if scan_type == "quick":
+        # Handle job dispatcher scan types (nmap_quick, nmap_full, nmap_vuln)
+        # and legacy scan types (quick, full, ports, vuln, discovery)
+        if scan_type in ("quick", "nmap_quick", "syn"):
             cmd.extend(["-T4", "-F"])  # Fast scan, top 100 ports
-        elif scan_type == "full":
+        elif scan_type in ("full", "nmap_full"):
             cmd.extend(["-T4", "-A", "-p-"])  # All ports, version detection, scripts
-        elif scan_type == "ports":
+        elif scan_type in ("ports", "connect"):
             cmd.extend(["-T4", "-sV"])  # Version detection
             if ports:
                 cmd.extend(["-p", ports])
-        elif scan_type == "vuln":
+        elif scan_type in ("vuln", "nmap_vuln"):
             cmd.extend(["-T4", "-sV", "--script", "vuln"])
             if ports:
                 cmd.extend(["-p", ports])
         elif scan_type == "discovery":
             cmd.extend(["-sn"])  # Ping scan only, no port scan
+        else:
+            # Default to quick scan for any unrecognized type
+            cmd.extend(["-T4", "-F"])
         
         # Add extra arguments if provided (be careful with this)
         if extra_args:
@@ -808,11 +1124,14 @@ class MicroHackAgent:
             response["error"] = "No target specified"
             return response
         
-        # Check if nikto is installed
-        if not shutil.which("nikto"):
+        # Check if nikto is installed, auto-install if needed
+        installed, install_msg = await self.ensure_tool_installed("nikto")
+        if not installed:
             response["success"] = False
-            response["error"] = "nikto is not installed. Use the install_tool command to install it."
+            response["error"] = install_msg
             return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "nikto"
         
         # Get options
         port = command_data.get("port", 80)
@@ -900,11 +1219,14 @@ class MicroHackAgent:
             response["error"] = "No target specified"
             return response
         
-        # Check if dirb is installed
-        if not shutil.which("dirb"):
+        # Check if dirb is installed, auto-install if needed
+        installed, install_msg = await self.ensure_tool_installed("dirb")
+        if not installed:
             response["success"] = False
-            response["error"] = "dirb is not installed. Use the install_tool command to install it."
+            response["error"] = install_msg
             return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "dirb"
         
         # Ensure URL has scheme
         if not target.startswith(("http://", "https://")):
@@ -998,11 +1320,14 @@ class MicroHackAgent:
             response["error"] = "No target specified"
             return response
         
-        # Check if sslscan is installed
-        if not shutil.which("sslscan"):
+        # Check if sslscan is installed, auto-install if needed
+        installed, install_msg = await self.ensure_tool_installed("sslscan")
+        if not installed:
             response["success"] = False
-            response["error"] = "sslscan is not installed. Use the install_tool command to install it."
+            response["error"] = install_msg
             return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "sslscan"
         
         # Get options
         port = command_data.get("port", 443)
@@ -1139,11 +1464,14 @@ class MicroHackAgent:
             response["error"] = "No target specified"
             return response
         
-        # Check if gobuster is installed
-        if not shutil.which("gobuster"):
+        # Check if gobuster is installed, auto-install if needed
+        installed, install_msg = await self.ensure_tool_installed("gobuster")
+        if not installed:
             response["success"] = False
-            response["error"] = "gobuster is not installed. Use the install_tool command to install it."
+            response["error"] = install_msg
             return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "gobuster"
         
         # Ensure URL has scheme
         if not target.startswith(("http://", "https://")):
@@ -1243,11 +1571,14 @@ class MicroHackAgent:
             response["error"] = "No target specified"
             return response
         
-        # Check if whatweb is installed
-        if not shutil.which("whatweb"):
+        # Check if whatweb is installed, auto-install if needed
+        installed, install_msg = await self.ensure_tool_installed("whatweb")
+        if not installed:
             response["success"] = False
-            response["error"] = "whatweb is not installed. Use the install_tool command to install it."
+            response["error"] = install_msg
             return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "whatweb"
         
         # Ensure URL has scheme
         if not target.startswith(("http://", "https://")):
@@ -1271,7 +1602,7 @@ class MicroHackAgent:
             
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=120  # 2 minute timeout
+                timeout=240  # 4 minute timeout for complex sites
             )
             
             output = stdout.decode("utf-8", errors="replace")
@@ -1305,7 +1636,7 @@ class MicroHackAgent:
             
         except asyncio.TimeoutError:
             response["success"] = False
-            response["error"] = "WhatWeb scan timed out (2 minute limit)"
+            response["error"] = "WhatWeb scan timed out (4 minute limit)"
             self.log("WhatWeb scan timed out", "ERROR")
         except Exception as e:
             response["success"] = False
@@ -1313,6 +1644,1608 @@ class MicroHackAgent:
             self.log(f"WhatWeb error: {e}", "ERROR")
         
         return response
+    
+    async def run_traceroute(self, command_id: str, command_data: dict) -> dict:
+        """Run a visual traceroute to a target"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        # Check if traceroute is installed, auto-install if needed
+        installed, install_msg = await self.ensure_tool_installed("traceroute")
+        if not installed:
+            response["success"] = False
+            response["error"] = install_msg
+            return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "traceroute"
+        
+        # Get options
+        max_hops = command_data.get("max_hops", 30)
+        timeout = command_data.get("timeout", 2)
+        project_id = command_data.get("project_id")
+        
+        # Build traceroute command
+        cmd = ["traceroute", "-n", "-m", str(max_hops), "-w", str(timeout), target]
+        
+        self.log(f"Running traceroute: {' '.join(cmd)}")
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=120  # 2 minute timeout for traceroute
+            )
+            
+            output = stdout.decode("utf-8", errors="replace")
+            
+            # Parse traceroute output
+            hops = []
+            for line in output.strip().split("\n"):
+                # Skip header line
+                if line.startswith('traceroute') or 'hops max' in line.lower():
+                    continue
+                
+                # Parse hop line: "1  192.168.1.1  1.234 ms  1.456 ms  1.789 ms"
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        hop_num = int(parts[0])
+                        ip = parts[1] if parts[1] != '*' else None
+                        
+                        # Get RTT values
+                        rtts = []
+                        for i, part in enumerate(parts[2:]):
+                            if part != '*' and part != 'ms':
+                                try:
+                                    rtts.append(float(part))
+                                except ValueError:
+                                    pass
+                        
+                        hops.append({
+                            "hop": hop_num,
+                            "ip": ip,
+                            "rtts": rtts,
+                            "avg_rtt": sum(rtts) / len(rtts) if rtts else None
+                        })
+                    except (ValueError, IndexError):
+                        continue
+            
+            response["data"] = {
+                "target": target,
+                "hops": hops,
+                "hop_count": len(hops),
+                "raw_output": output,
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"Traceroute complete: {len(hops)} hops")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Traceroute timed out (2 minute limit)"
+            self.log("Traceroute timed out", "ERROR")
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Traceroute error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_ssh_audit(self, command_id: str, command_data: dict) -> dict:
+        """Run SSH audit to check SSH server security"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        port = command_data.get("port", 22)
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        project_id = command_data.get("project_id")
+        
+        # Try to connect and get SSH banner/info using socket
+        import socket
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((target, int(port)))
+            
+            # Get banner
+            banner = sock.recv(1024).decode('utf-8', errors='replace').strip()
+            sock.close()
+            
+            # Parse banner for version info
+            ssh_version = None
+            software = None
+            if banner:
+                parts = banner.split()
+                if len(parts) >= 1:
+                    ssh_version = parts[0]
+                if len(parts) >= 2:
+                    software = parts[1] if len(parts) > 1 else None
+            
+            response["data"] = {
+                "target": target,
+                "port": port,
+                "banner": banner,
+                "ssh_version": ssh_version,
+                "software": software,
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"SSH audit complete: {banner}")
+            
+        except socket.timeout:
+            response["success"] = False
+            response["error"] = "Connection timed out"
+        except ConnectionRefusedError:
+            response["success"] = False
+            response["error"] = "Connection refused - SSH port may be closed"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"SSH audit error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_ftp_anon(self, command_id: str, command_data: dict) -> dict:
+        """Check if FTP server allows anonymous login"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        port = command_data.get("port", 21)
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        project_id = command_data.get("project_id")
+        
+        import socket
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((target, int(port)))
+            
+            # Get banner
+            banner = sock.recv(1024).decode('utf-8', errors='replace').strip()
+            
+            # Try anonymous login
+            sock.send(b"USER anonymous\r\n")
+            user_response = sock.recv(1024).decode('utf-8', errors='replace').strip()
+            
+            anonymous_allowed = False
+            if "331" in user_response:  # 331 = password required
+                sock.send(b"PASS anonymous@\r\n")
+                pass_response = sock.recv(1024).decode('utf-8', errors='replace').strip()
+                anonymous_allowed = "230" in pass_response  # 230 = login successful
+            
+            sock.send(b"QUIT\r\n")
+            sock.close()
+            
+            response["data"] = {
+                "target": target,
+                "port": port,
+                "banner": banner,
+                "anonymous_allowed": anonymous_allowed,
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"FTP anonymous check complete: anonymous={'allowed' if anonymous_allowed else 'denied'}")
+            
+        except socket.timeout:
+            response["success"] = False
+            response["error"] = "Connection timed out"
+        except ConnectionRefusedError:
+            response["success"] = False
+            response["error"] = "Connection refused - FTP port may be closed"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"FTP anon check error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_smtp_scan(self, command_id: str, command_data: dict) -> dict:
+        """Scan SMTP server for info and capabilities"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        port = command_data.get("port", 25)
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        project_id = command_data.get("project_id")
+        
+        import socket
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((target, int(port)))
+            
+            # Get banner
+            banner = sock.recv(1024).decode('utf-8', errors='replace').strip()
+            
+            # Send EHLO to get capabilities
+            sock.send(b"EHLO test\r\n")
+            ehlo_response = sock.recv(2048).decode('utf-8', errors='replace').strip()
+            
+            # Parse capabilities from EHLO response
+            capabilities = []
+            for line in ehlo_response.split('\n'):
+                line = line.strip()
+                if line.startswith('250-') or line.startswith('250 '):
+                    cap = line[4:].strip()
+                    if cap and cap.upper() != target.upper():
+                        capabilities.append(cap)
+            
+            sock.send(b"QUIT\r\n")
+            sock.close()
+            
+            response["data"] = {
+                "target": target,
+                "port": port,
+                "banner": banner,
+                "capabilities": capabilities,
+                "supports_starttls": any('STARTTLS' in c.upper() for c in capabilities),
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"SMTP scan complete: {len(capabilities)} capabilities")
+            
+        except socket.timeout:
+            response["success"] = False
+            response["error"] = "Connection timed out"
+        except ConnectionRefusedError:
+            response["success"] = False
+            response["error"] = "Connection refused - SMTP port may be closed"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"SMTP scan error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_imap_scan(self, command_id: str, command_data: dict) -> dict:
+        """Scan IMAP server for info and capabilities"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        port = command_data.get("port", 143)
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        project_id = command_data.get("project_id")
+        
+        import socket
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((target, int(port)))
+            
+            # Get banner
+            banner = sock.recv(1024).decode('utf-8', errors='replace').strip()
+            
+            # Send CAPABILITY command
+            sock.send(b"a001 CAPABILITY\r\n")
+            cap_response = sock.recv(2048).decode('utf-8', errors='replace').strip()
+            
+            # Parse capabilities
+            capabilities = []
+            for line in cap_response.split('\n'):
+                if 'CAPABILITY' in line.upper():
+                    parts = line.split()
+                    for part in parts:
+                        part = part.strip()
+                        if part and part.upper() not in ['*', 'CAPABILITY', 'A001', 'OK']:
+                            capabilities.append(part)
+            
+            sock.send(b"a002 LOGOUT\r\n")
+            sock.close()
+            
+            response["data"] = {
+                "target": target,
+                "port": port,
+                "banner": banner,
+                "capabilities": capabilities,
+                "supports_starttls": any('STARTTLS' in c.upper() for c in capabilities),
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"IMAP scan complete: {len(capabilities)} capabilities")
+            
+        except socket.timeout:
+            response["success"] = False
+            response["error"] = "Connection timed out"
+        except ConnectionRefusedError:
+            response["success"] = False
+            response["error"] = "Connection refused - IMAP port may be closed"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"IMAP scan error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_banner_grab(self, command_id: str, command_data: dict) -> dict:
+        """Grab banner from any TCP service"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        port = command_data.get("port", 80)
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        project_id = command_data.get("project_id")
+        
+        import socket
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((target, int(port)))
+            
+            # Try to get banner (some services send on connect)
+            banner = ""
+            try:
+                sock.setblocking(False)
+                import select
+                ready, _, _ = select.select([sock], [], [], 3)
+                if ready:
+                    banner = sock.recv(1024).decode('utf-8', errors='replace').strip()
+            except:
+                pass
+            
+            # If no banner, try sending probe data
+            if not banner:
+                sock.setblocking(True)
+                sock.settimeout(5)
+                # Send HTTP probe for common ports
+                if port in [80, 8080, 8000, 8888, 443]:
+                    sock.send(b"HEAD / HTTP/1.0\r\nHost: " + target.encode() + b"\r\n\r\n")
+                else:
+                    sock.send(b"\r\n")
+                try:
+                    banner = sock.recv(1024).decode('utf-8', errors='replace').strip()
+                except:
+                    pass
+            
+            sock.close()
+            
+            response["data"] = {
+                "target": target,
+                "port": port,
+                "banner": banner,
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"Banner grab complete: {len(banner)} bytes")
+            
+        except socket.timeout:
+            response["success"] = False
+            response["error"] = "Connection timed out"
+        except ConnectionRefusedError:
+            response["success"] = False
+            response["error"] = f"Connection refused - port {port} may be closed"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Banner grab error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_screenshot(self, command_id: str, command_data: dict) -> dict:
+        """Take a screenshot of a web page"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        port = command_data.get("port", 80)
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        project_id = command_data.get("project_id")
+        
+        # Determine URL
+        if not target.startswith(("http://", "https://")):
+            scheme = "https" if port == 443 else "http"
+            url = f"{scheme}://{target}:{port}" if port not in [80, 443] else f"{scheme}://{target}"
+        else:
+            url = target
+        
+        # Check for chromium/chrome, auto-install if needed
+        browser = None
+        for b in ["chromium", "chromium-browser", "google-chrome", "chrome"]:
+            if shutil.which(b):
+                browser = b
+                break
+        
+        if not browser:
+            # Try to auto-install chromium
+            installed, install_msg = await self.ensure_tool_installed("chromium")
+            if installed:
+                # Check again after install
+                for b in ["chromium", "chromium-browser"]:
+                    if shutil.which(b):
+                        browser = b
+                        break
+                if browser and install_msg == "installed":
+                    response["data"]["auto_installed"] = "chromium"
+        
+        if not browser:
+            response["success"] = False
+            response["error"] = "No browser available (chromium/chrome required). Auto-install failed or requires root privileges."
+            return response
+        
+        try:
+            import tempfile
+            import base64
+            
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                tmp_path = tmp.name
+            
+            cmd = [
+                browser,
+                "--headless",
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                f"--screenshot={tmp_path}",
+                "--window-size=1280,1024",
+                "--hide-scrollbars",
+                "--timeout=60000",  # 60 second page load timeout
+                url
+            ]
+            
+            self.log(f"Taking screenshot: {url}")
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            await asyncio.wait_for(process.communicate(), timeout=90)  # 90 seconds for slow sites
+            
+            # Read and encode screenshot
+            import os
+            if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                with open(tmp_path, 'rb') as f:
+                    screenshot_data = base64.b64encode(f.read()).decode('utf-8')
+                os.unlink(tmp_path)
+                
+                response["data"] = {
+                    "target": target,
+                    "url": url,
+                    "port": port,
+                    "screenshot": screenshot_data,
+                    "project_id": project_id,
+                    "scanned_at": datetime.utcnow().isoformat(),
+                    "agent_id": self.agent_id,
+                    "agent_hostname": self.hostname
+                }
+                self.log(f"Screenshot complete: {len(screenshot_data)} bytes")
+            else:
+                response["success"] = False
+                response["error"] = "Screenshot file was not created"
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                    
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Screenshot timed out"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Screenshot error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_http_headers(self, command_id: str, command_data: dict) -> dict:
+        """Get HTTP headers from a web server"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        port = command_data.get("port", 80)
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        project_id = command_data.get("project_id")
+        
+        # Determine URL
+        if not target.startswith(("http://", "https://")):
+            scheme = "https" if port == 443 else "http"
+            url = f"{scheme}://{target}:{port}" if port not in [80, 443] else f"{scheme}://{target}"
+        else:
+            url = target
+        
+        try:
+            import urllib.request
+            import ssl
+            
+            # Create request
+            req = urllib.request.Request(url, method='HEAD')
+            req.add_header('User-Agent', 'Mozilla/5.0 (compatible; MicroHack/1.0)')
+            
+            # Handle SSL
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            with urllib.request.urlopen(req, timeout=10, context=context) as resp:
+                headers = dict(resp.headers)
+                status_code = resp.status
+            
+            response["data"] = {
+                "target": target,
+                "url": url,
+                "port": port,
+                "status_code": status_code,
+                "headers": headers,
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"HTTP headers complete: {len(headers)} headers")
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"HTTP headers error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_robots_fetch(self, command_id: str, command_data: dict) -> dict:
+        """Fetch robots.txt from a web server"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        port = command_data.get("port", 80)
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        project_id = command_data.get("project_id")
+        
+        # Determine base URL
+        if not target.startswith(("http://", "https://")):
+            scheme = "https" if port == 443 else "http"
+            base_url = f"{scheme}://{target}:{port}" if port not in [80, 443] else f"{scheme}://{target}"
+        else:
+            base_url = target.rstrip('/')
+        
+        robots_url = f"{base_url}/robots.txt"
+        
+        try:
+            import urllib.request
+            import ssl
+            
+            req = urllib.request.Request(robots_url)
+            req.add_header('User-Agent', 'Mozilla/5.0 (compatible; MicroHack/1.0)')
+            
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            with urllib.request.urlopen(req, timeout=10, context=context) as resp:
+                content = resp.read().decode('utf-8', errors='replace')
+                status_code = resp.status
+            
+            # Parse robots.txt
+            disallowed = []
+            allowed = []
+            sitemaps = []
+            
+            for line in content.split('\n'):
+                line = line.strip()
+                if line.lower().startswith('disallow:'):
+                    path = line[9:].strip()
+                    if path:
+                        disallowed.append(path)
+                elif line.lower().startswith('allow:'):
+                    path = line[6:].strip()
+                    if path:
+                        allowed.append(path)
+                elif line.lower().startswith('sitemap:'):
+                    sitemap = line[8:].strip()
+                    if sitemap:
+                        sitemaps.append(sitemap)
+            
+            response["data"] = {
+                "target": target,
+                "url": robots_url,
+                "port": port,
+                "status_code": status_code,
+                "content": content,
+                "disallowed": disallowed,
+                "allowed": allowed,
+                "sitemaps": sitemaps,
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"Robots.txt fetch complete: {len(disallowed)} disallowed, {len(sitemaps)} sitemaps")
+            
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                response["data"] = {
+                    "target": target,
+                    "url": robots_url,
+                    "port": port,
+                    "status_code": 404,
+                    "content": None,
+                    "disallowed": [],
+                    "allowed": [],
+                    "sitemaps": [],
+                    "project_id": project_id,
+                    "scanned_at": datetime.utcnow().isoformat()
+                }
+                self.log("No robots.txt found (404)")
+            else:
+                response["success"] = False
+                response["error"] = f"HTTP error: {e.code}"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Robots.txt fetch error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_dns_server_scan(self, command_id: str, command_data: dict) -> dict:
+        """Interrogate a DNS server for security issues (requires dig)"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        port = command_data.get("port", 53)
+        
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        # Check if dig is available, auto-install if needed
+        installed, install_msg = await self.ensure_tool_installed("dig")
+        if not installed:
+            response["success"] = False
+            response["error"] = install_msg
+            return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "dig"
+        
+        try:
+            import re
+            results = {
+                'server_version': None,
+                'server_hostname': None,
+                'recursion_enabled': False,
+                'recursion_test_result': None,
+                'zone_transfer_enabled': False,
+                'cache_snooping_possible': False,
+                'cached_domains': [],
+                'dnssec_enabled': False,
+                'amplification_factor': None,
+                'raw_output': ''
+            }
+            raw_outputs = []
+            test_domain = 'google.com'
+            
+            # Version Query (CHAOS)
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "dig", f"@{target}", "-p", str(port), "version.bind", "TXT", "CHAOS", "+short",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+                output = stdout.decode().strip().strip('"')
+                raw_outputs.append(f"=== Version Query ===\n{output}")
+                if output and not output.startswith(';') and 'connection refused' not in output.lower():
+                    results['server_version'] = output
+            except asyncio.TimeoutError:
+                raw_outputs.append("Version query timed out")
+            except Exception as e:
+                raw_outputs.append(f"Version query failed: {e}")
+            
+            # Hostname Query (CHAOS)
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "dig", f"@{target}", "-p", str(port), "hostname.bind", "TXT", "CHAOS", "+short",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+                output = stdout.decode().strip().strip('"')
+                raw_outputs.append(f"=== Hostname Query ===\n{output}")
+                if output and not output.startswith(';') and 'connection refused' not in output.lower():
+                    results['server_hostname'] = output
+            except asyncio.TimeoutError:
+                raw_outputs.append("Hostname query timed out")
+            except Exception as e:
+                raw_outputs.append(f"Hostname query failed: {e}")
+            
+            # Recursion Check (Open Resolver Test)
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "dig", f"@{target}", "-p", str(port), test_domain, "A", "+recurse", "+short",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+                output = stdout.decode().strip()
+                raw_outputs.append(f"=== Recursion Test ===\n{output}")
+                if output and not output.startswith(';') and 'REFUSED' not in output.upper():
+                    ips = re.findall(r'\d+\.\d+\.\d+\.\d+', output)
+                    if ips:
+                        results['recursion_enabled'] = True
+                        results['recursion_test_result'] = f"Resolved {test_domain} to: {', '.join(ips)}"
+            except asyncio.TimeoutError:
+                raw_outputs.append("Recursion test timed out")
+            except Exception as e:
+                raw_outputs.append(f"Recursion test failed: {e}")
+            
+            # Cache Snooping
+            cached_domains = []
+            domains_to_check = ['google.com', 'facebook.com', 'microsoft.com']
+            for domain in domains_to_check:
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        "dig", f"@{target}", "-p", str(port), domain, "A", "+norecurse", "+short",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+                    output = stdout.decode().strip()
+                    if output and not output.startswith(';') and 'REFUSED' not in output.upper():
+                        ips = re.findall(r'\d+\.\d+\.\d+\.\d+', output)
+                        if ips:
+                            cached_domains.append({'domain': domain, 'cached_ips': ips})
+                except:
+                    pass
+            
+            if cached_domains:
+                results['cache_snooping_possible'] = True
+                results['cached_domains'] = cached_domains
+            raw_outputs.append(f"=== Cache Snooping ===\nCached: {len(cached_domains)} domains")
+            
+            # DNSSEC Check
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "dig", f"@{target}", "-p", str(port), test_domain, "DNSKEY", "+short",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+                output = stdout.decode().strip()
+                if output and not output.startswith(';'):
+                    results['dnssec_enabled'] = True
+                raw_outputs.append(f"=== DNSSEC ===\n{output[:200] if output else 'None'}")
+            except:
+                pass
+            
+            # Amplification Test
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "dig", f"@{target}", "-p", str(port), test_domain, "ANY", "+bufsize=4096",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+                output = stdout.decode()
+                if output:
+                    response_size = len(output)
+                    request_size = 50
+                    results['amplification_factor'] = round(response_size / request_size, 2)
+                raw_outputs.append(f"=== Amplification ===\nResponse size: {len(output)} bytes")
+            except:
+                pass
+            
+            results['raw_output'] = '\n\n'.join(raw_outputs)
+            
+            response["data"] = {
+                "target": target,
+                "port": port,
+                "dns_server": results,
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname,
+                "scanned_at": datetime.utcnow().isoformat()
+            }
+            
+            self.log(f"DNS server scan complete: recursion={results['recursion_enabled']}")
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"DNS server scan error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_dig_lookup(self, command_id: str, command_data: dict) -> dict:
+        """Perform dig DNS lookup (requires dig)"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        query_type = command_data.get("query_type", "A")
+        dns_server = command_data.get("dns_server", "1.1.1.1")
+        
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        # Check if dig is available, auto-install if needed
+        installed, install_msg = await self.ensure_tool_installed("dig")
+        if not installed:
+            response["success"] = False
+            response["error"] = install_msg
+            return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "dig"
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "dig", f"@{dns_server}", target, query_type, "+noall", "+answer",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+            
+            output = stdout.decode().strip()
+            records = [line for line in output.split('\n') if line.strip()]
+            
+            response["data"] = {
+                "target": target,
+                "query_type": query_type,
+                "dns_server": dns_server,
+                "records": records,
+                "raw_output": output,
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname,
+                "scanned_at": datetime.utcnow().isoformat()
+            }
+            
+            self.log(f"Dig lookup complete: {len(records)} records")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Dig lookup timed out"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Dig lookup error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_ip_reputation(self, command_id: str, command_data: dict) -> dict:
+        """Check IP reputation via DNS blacklists"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        try:
+            import socket
+            
+            # Reverse the IP for DNSBL queries
+            parts = target.split('.')
+            if len(parts) != 4:
+                response["success"] = False
+                response["error"] = "Invalid IP address format"
+                return response
+            
+            reversed_ip = '.'.join(reversed(parts))
+            
+            # Common DNSBLs to check
+            dnsbls = [
+                'zen.spamhaus.org',
+                'bl.spamcop.net',
+                'b.barracudacentral.org',
+                'dnsbl.sorbs.net',
+                'spam.dnsbl.sorbs.net'
+            ]
+            
+            listings = []
+            for dnsbl in dnsbls:
+                query = f"{reversed_ip}.{dnsbl}"
+                try:
+                    socket.gethostbyname(query)
+                    listings.append(dnsbl)
+                except socket.gaierror:
+                    pass  # Not listed
+            
+            response["data"] = {
+                "target": target,
+                "dnsbls_checked": len(dnsbls),
+                "listings": listings,
+                "is_listed": len(listings) > 0,
+                "reputation_score": 100 - (len(listings) * 20),  # Simple score
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname,
+                "scanned_at": datetime.utcnow().isoformat()
+            }
+            
+            self.log(f"IP reputation check complete: listed on {len(listings)} DNSBLs")
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"IP reputation error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_domain_reputation(self, command_id: str, command_data: dict) -> dict:
+        """Check domain reputation"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        # Try to install dig for better results (optional - will work without it)
+        installed, install_msg = await self.ensure_tool_installed("dig")
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "dig"
+        
+        try:
+            import socket
+            
+            results = {
+                'has_spf': False,
+                'has_dkim': False,
+                'has_dmarc': False,
+                'mx_records': [],
+                'ns_records': []
+            }
+            
+            # Check SPF record
+            try:
+                if shutil.which("dig"):
+                    process = await asyncio.create_subprocess_exec(
+                        "dig", "+short", "TXT", target,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+                    txt_records = stdout.decode().strip()
+                    if 'v=spf1' in txt_records.lower():
+                        results['has_spf'] = True
+            except:
+                pass
+            
+            # Check DMARC record
+            try:
+                if shutil.which("dig"):
+                    process = await asyncio.create_subprocess_exec(
+                        "dig", "+short", "TXT", f"_dmarc.{target}",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+                    dmarc_record = stdout.decode().strip()
+                    if 'v=dmarc1' in dmarc_record.lower():
+                        results['has_dmarc'] = True
+            except:
+                pass
+            
+            # Get MX records
+            try:
+                if shutil.which("dig"):
+                    process = await asyncio.create_subprocess_exec(
+                        "dig", "+short", "MX", target,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+                    mx = [r.strip() for r in stdout.decode().strip().split('\n') if r.strip()]
+                    results['mx_records'] = mx
+            except:
+                pass
+            
+            # Get NS records
+            try:
+                if shutil.which("dig"):
+                    process = await asyncio.create_subprocess_exec(
+                        "dig", "+short", "NS", target,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+                    ns = [r.strip() for r in stdout.decode().strip().split('\n') if r.strip()]
+                    results['ns_records'] = ns
+            except:
+                pass
+            
+            # Calculate simple reputation score
+            score = 50
+            if results['has_spf']:
+                score += 15
+            if results['has_dmarc']:
+                score += 20
+            if results['mx_records']:
+                score += 10
+            if results['ns_records']:
+                score += 5
+            
+            response["data"] = {
+                "target": target,
+                "reputation": results,
+                "reputation_score": min(score, 100),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname,
+                "scanned_at": datetime.utcnow().isoformat()
+            }
+            
+            self.log(f"Domain reputation check complete: score={score}")
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Domain reputation error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_speedtest(self, command_id: str, command_data: dict) -> dict:
+        """Run internet speed test - prefers official Ookla CLI for accurate gigabit results"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        try:
+            # Priority order:
+            # 1. Official Ookla speedtest CLI (multi-threaded, accurate for gigabit)
+            # 2. speedtest-cli (Python, single-threaded, caps around 100-200 Mbps)
+            
+            speedtest_cmd = None
+            use_ookla = False
+            
+            # Check for official Ookla CLI first (it's just called 'speedtest')
+            if shutil.which("speedtest"):
+                # Verify it's the Ookla version by checking help output
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        "speedtest", "--version",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+                    version_output = stdout.decode().lower()
+                    if "ookla" in version_output or "speedtest by" in version_output:
+                        speedtest_cmd = "speedtest"
+                        use_ookla = True
+                        self.log("Using official Ookla speedtest CLI (multi-threaded)")
+                except:
+                    pass
+            
+            # Fallback to speedtest-cli
+            if not speedtest_cmd:
+                if shutil.which("speedtest-cli"):
+                    speedtest_cmd = "speedtest-cli"
+                    self.log("Using speedtest-cli (note: may cap around 100-200 Mbps for fast connections)")
+            
+            # Try to install if nothing found
+            if not speedtest_cmd:
+                self.log("No speedtest tool found, attempting to install...")
+                
+                # Try to install official Ookla CLI first (Debian/Ubuntu)
+                if self._is_root():
+                    try:
+                        # Add Ookla repository and install
+                        install_script = """
+curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash && \
+apt-get install -y speedtest
+"""
+                        process = await asyncio.create_subprocess_shell(
+                            install_script,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        await asyncio.wait_for(process.communicate(), timeout=120)
+                        if shutil.which("speedtest"):
+                            speedtest_cmd = "speedtest"
+                            use_ookla = True
+                            response["data"]["auto_installed"] = "ookla-speedtest"
+                    except:
+                        pass
+                
+                # Fallback to pip install speedtest-cli
+                if not speedtest_cmd:
+                    try:
+                        process = await asyncio.create_subprocess_exec(
+                            "pip3", "install", "speedtest-cli",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        await asyncio.wait_for(process.communicate(), timeout=60)
+                        if shutil.which("speedtest-cli"):
+                            speedtest_cmd = "speedtest-cli"
+                            response["data"]["auto_installed"] = "speedtest-cli"
+                    except:
+                        pass
+            
+            if not speedtest_cmd:
+                response["success"] = False
+                response["error"] = "No speedtest tool available. For gigabit speeds, install official Ookla CLI: https://www.speedtest.net/apps/cli"
+                return response
+            
+            self.log(f"Running speedtest using {speedtest_cmd}...")
+            
+            if use_ookla:
+                # Official Ookla CLI with JSON output and license acceptance
+                process = await asyncio.create_subprocess_exec(
+                    speedtest_cmd, "--format=json", "--accept-license", "--accept-gdpr",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+                
+                if process.returncode != 0:
+                    response["success"] = False
+                    response["error"] = f"Speedtest failed: {stderr.decode()}"
+                    return response
+                
+                import json as json_module
+                result = json_module.loads(stdout.decode())
+                
+                # Ookla CLI returns bandwidth in bytes/sec
+                download_bps = result.get("download", {}).get("bandwidth", 0) * 8  # Convert to bits
+                upload_bps = result.get("upload", {}).get("bandwidth", 0) * 8
+                
+                response["data"] = {
+                    "ping_ms": result.get("ping", {}).get("latency"),
+                    "jitter_ms": result.get("ping", {}).get("jitter"),
+                    "download_mbps": round(download_bps / 1_000_000, 2),
+                    "upload_mbps": round(upload_bps / 1_000_000, 2),
+                    "download_bytes": result.get("download", {}).get("bytes"),
+                    "upload_bytes": result.get("upload", {}).get("bytes"),
+                    "packet_loss": result.get("packetLoss"),
+                    "server": {
+                        "id": result.get("server", {}).get("id"),
+                        "name": result.get("server", {}).get("name"),
+                        "location": result.get("server", {}).get("location"),
+                        "country": result.get("server", {}).get("country"),
+                        "host": result.get("server", {}).get("host"),
+                        "ip": result.get("server", {}).get("ip")
+                    },
+                    "client": {
+                        "ip": result.get("interface", {}).get("externalIp"),
+                        "internal_ip": result.get("interface", {}).get("internalIp"),
+                        "isp": result.get("isp"),
+                    },
+                    "result_url": result.get("result", {}).get("url"),
+                    "tool": "ookla-speedtest",
+                    "agent_id": self.agent_id,
+                    "agent_hostname": self.hostname,
+                    "tested_at": datetime.utcnow().isoformat()
+                }
+            else:
+                # speedtest-cli (Python version)
+                process = await asyncio.create_subprocess_exec(
+                    speedtest_cmd, "--json",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+                
+                if process.returncode != 0:
+                    # Try simple output
+                    process = await asyncio.create_subprocess_exec(
+                        speedtest_cmd, "--simple",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+                    
+                    if process.returncode != 0:
+                        response["success"] = False
+                        response["error"] = f"Speedtest failed: {stderr.decode()}"
+                        return response
+                    
+                    output = stdout.decode().strip()
+                    lines = output.split('\n')
+                    results = {"ping": None, "download": None, "upload": None}
+                    for line in lines:
+                        if line.startswith("Ping:"):
+                            try: results["ping"] = float(line.split(":")[1].strip().split()[0])
+                            except: pass
+                        elif line.startswith("Download:"):
+                            try: results["download"] = float(line.split(":")[1].strip().split()[0])
+                            except: pass
+                        elif line.startswith("Upload:"):
+                            try: results["upload"] = float(line.split(":")[1].strip().split()[0])
+                            except: pass
+                    
+                    response["data"] = {
+                        "ping_ms": results["ping"],
+                        "download_mbps": results["download"],
+                        "upload_mbps": results["upload"],
+                        "raw_output": output,
+                        "tool": "speedtest-cli",
+                        "note": "For accurate gigabit results, install official Ookla CLI",
+                        "agent_id": self.agent_id,
+                        "agent_hostname": self.hostname,
+                        "tested_at": datetime.utcnow().isoformat()
+                    }
+                else:
+                    import json as json_module
+                    result = json_module.loads(stdout.decode())
+                    
+                    response["data"] = {
+                        "ping_ms": result.get("ping"),
+                        "download_mbps": round(result.get("download", 0) / 1_000_000, 2),
+                        "upload_mbps": round(result.get("upload", 0) / 1_000_000, 2),
+                        "server": {
+                            "name": result.get("server", {}).get("name"),
+                            "country": result.get("server", {}).get("country"),
+                            "sponsor": result.get("server", {}).get("sponsor"),
+                            "host": result.get("server", {}).get("host"),
+                        },
+                        "client": {
+                            "ip": result.get("client", {}).get("ip"),
+                            "isp": result.get("client", {}).get("isp"),
+                            "country": result.get("client", {}).get("country")
+                        },
+                        "bytes_sent": result.get("bytes_sent"),
+                        "bytes_received": result.get("bytes_received"),
+                        "tool": "speedtest-cli",
+                        "note": "For accurate gigabit results, install official Ookla CLI",
+                        "agent_id": self.agent_id,
+                        "agent_hostname": self.hostname,
+                        "tested_at": datetime.utcnow().isoformat()
+                    }
+            
+            self.log(f"Speedtest complete: {response['data'].get('download_mbps')} Mbps down, {response['data'].get('upload_mbps')} Mbps up")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Speedtest timed out (>180 seconds)"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Speedtest error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_dns_lookup(self, command_id: str, command_data: dict) -> dict:
+        """Perform DNS lookup"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target")
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        project_id = command_data.get("project_id")
+        record_type = command_data.get("record_type", "A")
+        
+        import socket
+        
+        try:
+            results = {
+                "a_records": [],
+                "aaaa_records": [],
+                "mx_records": [],
+                "ns_records": [],
+                "txt_records": []
+            }
+            
+            # Get A records
+            try:
+                ips = socket.gethostbyname_ex(target)
+                results["a_records"] = ips[2]
+            except:
+                pass
+            
+            # Use dig if available for more record types
+            if shutil.which("dig"):
+                for rtype in ["MX", "NS", "TXT"]:
+                    try:
+                        process = await asyncio.create_subprocess_exec(
+                            "dig", "+short", rtype, target,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+                        records = [r.strip() for r in stdout.decode().strip().split('\n') if r.strip()]
+                        results[f"{rtype.lower()}_records"] = records
+                    except:
+                        pass
+            
+            response["data"] = {
+                "target": target,
+                "records": results,
+                "project_id": project_id,
+                "scanned_at": datetime.utcnow().isoformat(),
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname
+            }
+            
+            self.log(f"DNS lookup complete: {len(results['a_records'])} A records")
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"DNS lookup error: {e}", "ERROR")
+        
+        return response
+    
+    async def ensure_tool_installed(self, tool_name: str) -> tuple[bool, str]:
+        """
+        Check if a tool is installed, and auto-install it if possible.
+        
+        Returns:
+            tuple: (success: bool, message: str)
+            - If tool is already installed: (True, "")
+            - If tool was successfully installed: (True, "installed")
+            - If installation failed: (False, error_message)
+        """
+        # Map command names to tool names in TOOL_INSTALL_COMMANDS
+        tool_mapping = {
+            "nmap": "nmap",
+            "nikto": "nikto",
+            "dirb": "dirb",
+            "gobuster": "gobuster",
+            "sslscan": "sslscan",
+            "whatweb": "whatweb",
+            "traceroute": "traceroute",
+            "ssh-audit": "ssh-audit",
+            "enum4linux": "enum4linux",
+            "hydra": "hydra",
+            "wpscan": "wpscan",
+            "sqlmap": "sqlmap",
+            "ffuf": "ffuf",
+            "chromium": "chromium",
+        }
+        
+        # Get the actual tool name for lookup
+        lookup_name = tool_mapping.get(tool_name, tool_name)
+        
+        # Check if tool info exists
+        if lookup_name not in TOOL_INSTALL_COMMANDS:
+            # Tool not in our install list - just check if it exists
+            if shutil.which(tool_name):
+                return (True, "")
+            return (False, f"{tool_name} is not installed and cannot be auto-installed")
+        
+        tool_info = TOOL_INSTALL_COMMANDS[lookup_name]
+        check_cmd = tool_info.get("check", tool_name)
+        
+        # Check if already installed
+        if shutil.which(check_cmd):
+            return (True, "")
+        
+        # Tool not installed - try to auto-install
+        # Check if another installation is already in progress
+        if self._install_lock and self._install_lock.locked():
+            return (False, f"Another tool installation is in progress ({self._installing_tool}). Please wait and try again.")
+        
+        self.log(f"Tool '{tool_name}' not found, attempting auto-install...")
+        
+        # Check if we have root access
+        if not self._is_root():
+            return (False, f"{tool_name} is not installed. Auto-install requires root privileges. Run agent as root or install manually.")
+        
+        # Acquire installation lock (only one install at a time)
+        if not self._install_lock:
+            self._install_lock = asyncio.Lock()
+        
+        # Try to acquire lock without blocking to give immediate feedback
+        if self._install_lock.locked():
+            return (False, f"Another tool installation is in progress ({self._installing_tool}). Please wait and try again.")
+        
+        async with self._install_lock:
+            self._installing_tool = tool_name
+            try:
+                # Update package list first
+                self.log("Updating package list...")
+                update_process = await asyncio.create_subprocess_exec(
+                    "apt-get", "update",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await asyncio.wait_for(update_process.communicate(), timeout=120)
+                
+                # Run pre-install dependencies if defined
+                if tool_info.get("pre_install"):
+                    self.log(f"Installing dependencies for {tool_name}...")
+                    pre_process = await asyncio.create_subprocess_exec(
+                        *tool_info["pre_install"],
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    await asyncio.wait_for(pre_process.communicate(), timeout=180)
+                
+                # Try primary install method
+                self.log(f"Installing {tool_name}: {' '.join(tool_info['install'])}")
+                process = await asyncio.create_subprocess_exec(
+                    *tool_info["install"],
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=300  # 5 minute timeout
+                )
+                
+                # If primary install failed and there's an alternative, try it
+                if process.returncode != 0 and tool_info.get("install_alt"):
+                    error_msg = stderr.decode("utf-8", errors="replace")
+                    self.log(f"Primary install failed, trying alternative method...")
+                    
+                    # Make sure git is installed for alt methods
+                    if "git" in tool_info["install_alt"]:
+                        git_process = await asyncio.create_subprocess_exec(
+                            "apt-get", "install", "-y", "git",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        await asyncio.wait_for(git_process.communicate(), timeout=120)
+                    
+                    # Run alternative install
+                    alt_process = await asyncio.create_subprocess_exec(
+                        *tool_info["install_alt"],
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    alt_stdout, alt_stderr = await asyncio.wait_for(
+                        alt_process.communicate(),
+                        timeout=300
+                    )
+                    
+                    # Run post-install for alt method if defined
+                    if alt_process.returncode == 0 and tool_info.get("post_install_alt"):
+                        post_process = await asyncio.create_subprocess_exec(
+                            *tool_info["post_install_alt"],
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        await asyncio.wait_for(post_process.communicate(), timeout=60)
+                    
+                    if alt_process.returncode != 0:
+                        alt_error = alt_stderr.decode("utf-8", errors="replace")
+                        return (False, f"Failed to install {tool_name}: {alt_error}")
+                elif process.returncode != 0:
+                    error_msg = stderr.decode("utf-8", errors="replace")
+                    return (False, f"Failed to install {tool_name}: {error_msg}")
+                
+                # Verify installation
+                if shutil.which(check_cmd):
+                    self.log(f"Successfully auto-installed {tool_name}")
+                    return (True, "installed")
+                else:
+                    return (False, f"{tool_name} installation completed but binary not found in PATH")
+                    
+            except asyncio.TimeoutError:
+                return (False, f"Timeout while installing {tool_name}")
+            except Exception as e:
+                return (False, f"Error installing {tool_name}: {str(e)}")
+            finally:
+                self._installing_tool = None
     
     async def check_tools_status(self) -> dict:
         """Check which tools are installed and available"""
@@ -1395,111 +3328,125 @@ class MicroHackAgent:
             response["error"] = "Agent must run as root to install tools. Run with sudo or as root user."
             return response
         
-        self.log(f"Installing {tool_name}...")
+        # Acquire installation lock (only one install at a time)
+        if not self._install_lock:
+            self._install_lock = asyncio.Lock()
         
-        try:
-            # Update package list first
-            self.log("Updating package list...")
-            update_process = await asyncio.create_subprocess_exec(
-                "apt-get", "update",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await asyncio.wait_for(update_process.communicate(), timeout=120)
+        # Check if another installation is in progress
+        if self._install_lock.locked():
+            response["success"] = False
+            response["error"] = f"Another tool installation is in progress ({self._installing_tool}). Please wait and try again."
+            return response
+        
+        async with self._install_lock:
+            self._installing_tool = tool_name
+            self.log(f"Installing {tool_name}...")
             
-            # Run pre-install dependencies if defined
-            if tool_info.get("pre_install"):
-                self.log(f"Installing dependencies: {' '.join(tool_info['pre_install'])}")
-                pre_process = await asyncio.create_subprocess_exec(
-                    *tool_info["pre_install"],
+            try:
+                # Update package list first
+                self.log("Updating package list...")
+                update_process = await asyncio.create_subprocess_exec(
+                    "apt-get", "update",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                await asyncio.wait_for(pre_process.communicate(), timeout=180)
-            
-            # Try primary install method
-            self.log(f"Running: {' '.join(tool_info['install'])}")
-            process = await asyncio.create_subprocess_exec(
-                *tool_info["install"],
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=300  # 5 minute timeout
-            )
-            
-            # If primary install failed and there's an alternative, try it
-            if process.returncode != 0 and tool_info.get("install_alt"):
-                error_msg = stderr.decode("utf-8", errors="replace")
-                self.log(f"Primary install failed ({error_msg.strip()}), trying alternative method...")
+                await asyncio.wait_for(update_process.communicate(), timeout=120)
                 
-                # Make sure git is installed for alt methods
-                if "git" in tool_info["install_alt"]:
-                    git_process = await asyncio.create_subprocess_exec(
-                        "apt-get", "install", "-y", "git", "perl", "libnet-ssleay-perl",
+                # Run pre-install dependencies if defined
+                if tool_info.get("pre_install"):
+                    self.log(f"Installing dependencies: {' '.join(tool_info['pre_install'])}")
+                    pre_process = await asyncio.create_subprocess_exec(
+                        *tool_info["pre_install"],
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
-                    await asyncio.wait_for(git_process.communicate(), timeout=120)
+                    await asyncio.wait_for(pre_process.communicate(), timeout=180)
                 
-                # Run alternative install
-                self.log(f"Running: {' '.join(tool_info['install_alt'])}")
-                alt_process = await asyncio.create_subprocess_exec(
-                    *tool_info["install_alt"],
+                # Try primary install method
+                self.log(f"Running: {' '.join(tool_info['install'])}")
+                process = await asyncio.create_subprocess_exec(
+                    *tool_info["install"],
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                alt_stdout, alt_stderr = await asyncio.wait_for(
-                    alt_process.communicate(),
-                    timeout=300
+                
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=300  # 5 minute timeout
                 )
                 
-                if alt_process.returncode != 0:
-                    alt_error = alt_stderr.decode("utf-8", errors="replace")
+                # If primary install failed and there's an alternative, try it
+                if process.returncode != 0 and tool_info.get("install_alt"):
+                    error_msg = stderr.decode("utf-8", errors="replace")
+                    self.log(f"Primary install failed ({error_msg.strip()}), trying alternative method...")
+                    
+                    # Make sure git is installed for alt methods
+                    if "git" in tool_info["install_alt"]:
+                        git_process = await asyncio.create_subprocess_exec(
+                            "apt-get", "install", "-y", "git", "perl", "libnet-ssleay-perl",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        await asyncio.wait_for(git_process.communicate(), timeout=120)
+                    
+                    # Run alternative install
+                    self.log(f"Running: {' '.join(tool_info['install_alt'])}")
+                    alt_process = await asyncio.create_subprocess_exec(
+                        *tool_info["install_alt"],
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    alt_stdout, alt_stderr = await asyncio.wait_for(
+                        alt_process.communicate(),
+                        timeout=300
+                    )
+                    
+                    if alt_process.returncode != 0:
+                        alt_error = alt_stderr.decode("utf-8", errors="replace")
+                        response["success"] = False
+                        response["error"] = f"Installation failed: {alt_error}"
+                        self.log(f"Alt install failed: {alt_error}", "ERROR")
+                        return response
+                    
+                    # Run post-install if exists
+                    if tool_info.get("post_install_alt"):
+                        self.log(f"Running post-install: {' '.join(tool_info['post_install_alt'])}")
+                        post_process = await asyncio.create_subprocess_exec(
+                            *tool_info["post_install_alt"],
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        await asyncio.wait_for(post_process.communicate(), timeout=30)
+                
+                elif process.returncode != 0:
+                    error_msg = stderr.decode("utf-8", errors="replace")
                     response["success"] = False
-                    response["error"] = f"Installation failed: {alt_error}"
-                    self.log(f"Alt install failed: {alt_error}", "ERROR")
+                    response["error"] = f"Installation failed: {error_msg}"
+                    self.log(f"Install failed: {error_msg}", "ERROR")
                     return response
                 
-                # Run post-install if exists
-                if tool_info.get("post_install_alt"):
-                    self.log(f"Running post-install: {' '.join(tool_info['post_install_alt'])}")
-                    post_process = await asyncio.create_subprocess_exec(
-                        *tool_info["post_install_alt"],
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    await asyncio.wait_for(post_process.communicate(), timeout=30)
-            
-            elif process.returncode != 0:
-                error_msg = stderr.decode("utf-8", errors="replace")
+                # Verify installation
+                if shutil.which(tool_info["check"]):
+                    response["data"] = {
+                        "tool": tool_name,
+                        "status": "installed",
+                        "message": f"{tool_name} installed successfully"
+                    }
+                    self.log(f"{tool_name} installed successfully")
+                else:
+                    response["success"] = False
+                    response["error"] = f"{tool_name} install command succeeded but tool not found in PATH"
+                    
+            except asyncio.TimeoutError:
                 response["success"] = False
-                response["error"] = f"Installation failed: {error_msg}"
-                self.log(f"Install failed: {error_msg}", "ERROR")
-                return response
-            
-            # Verify installation
-            if shutil.which(tool_info["check"]):
-                response["data"] = {
-                    "tool": tool_name,
-                    "status": "installed",
-                    "message": f"{tool_name} installed successfully"
-                }
-                self.log(f"{tool_name} installed successfully")
-            else:
+                response["error"] = "Installation timed out (5 minute limit)"
+                self.log(f"Install timed out", "ERROR")
+            except Exception as e:
                 response["success"] = False
-                response["error"] = f"{tool_name} install command succeeded but tool not found in PATH"
-                
-        except asyncio.TimeoutError:
-            response["success"] = False
-            response["error"] = "Installation timed out (5 minute limit)"
-            self.log(f"Install timed out", "ERROR")
-        except Exception as e:
-            response["success"] = False
-            response["error"] = str(e)
-            self.log(f"Install error: {e}", "ERROR")
+                response["error"] = str(e)
+                self.log(f"Install error: {e}", "ERROR")
+            finally:
+                self._installing_tool = None
         
         return response
     
@@ -1691,6 +3638,12 @@ class MicroHackAgent:
                     "timestamp": datetime.utcnow().isoformat()
                 }
             
+            elif command == "host_ping":
+                # Run actual ping on a target host
+                self.log(f"Starting host ping for command_id: {command_id}")
+                response = await self.run_host_ping(command_id, command_data)
+                self.log(f"Host ping complete, success: {response.get('success')}")
+            
             elif command == "info":
                 response["data"] = {
                     "agent_id": self.agent_id,
@@ -1746,16 +3699,109 @@ class MicroHackAgent:
                 response = await self.run_whatweb_scan(command_id, command_data)
                 self.log(f"WhatWeb scan complete, success: {response.get('success')}")
             
+            elif command == "traceroute":
+                # Run visual traceroute
+                self.log(f"Starting traceroute for command_id: {command_id}")
+                response = await self.run_traceroute(command_id, command_data)
+                self.log(f"Traceroute complete, success: {response.get('success')}")
+            
+            elif command == "ssh_audit":
+                # Run SSH audit
+                self.log(f"Starting SSH audit for command_id: {command_id}")
+                response = await self.run_ssh_audit(command_id, command_data)
+                self.log(f"SSH audit complete, success: {response.get('success')}")
+            
+            elif command == "ftp_anon":
+                # Check FTP anonymous access
+                self.log(f"Starting FTP anon check for command_id: {command_id}")
+                response = await self.run_ftp_anon(command_id, command_data)
+                self.log(f"FTP anon check complete, success: {response.get('success')}")
+            
+            elif command == "smtp":
+                # SMTP scan
+                self.log(f"Starting SMTP scan for command_id: {command_id}")
+                response = await self.run_smtp_scan(command_id, command_data)
+                self.log(f"SMTP scan complete, success: {response.get('success')}")
+            
+            elif command == "imap":
+                # IMAP scan
+                self.log(f"Starting IMAP scan for command_id: {command_id}")
+                response = await self.run_imap_scan(command_id, command_data)
+                self.log(f"IMAP scan complete, success: {response.get('success')}")
+            
+            elif command == "banner":
+                # Banner grab
+                self.log(f"Starting banner grab for command_id: {command_id}")
+                response = await self.run_banner_grab(command_id, command_data)
+                self.log(f"Banner grab complete, success: {response.get('success')}")
+            
+            elif command == "screenshot":
+                # Take screenshot
+                self.log(f"Starting screenshot for command_id: {command_id}")
+                response = await self.run_screenshot(command_id, command_data)
+                self.log(f"Screenshot complete, success: {response.get('success')}")
+            
+            elif command == "http_headers":
+                # Get HTTP headers
+                self.log(f"Starting HTTP headers scan for command_id: {command_id}")
+                response = await self.run_http_headers(command_id, command_data)
+                self.log(f"HTTP headers complete, success: {response.get('success')}")
+            
+            elif command == "robots":
+                # Fetch robots.txt
+                self.log(f"Starting robots.txt fetch for command_id: {command_id}")
+                response = await self.run_robots_fetch(command_id, command_data)
+                self.log(f"Robots.txt fetch complete, success: {response.get('success')}")
+            
+            elif command == "dns":
+                # DNS lookup
+                self.log(f"Starting DNS lookup for command_id: {command_id}")
+                response = await self.run_dns_lookup(command_id, command_data)
+                self.log(f"DNS lookup complete, success: {response.get('success')}")
+            
+            elif command == "dns_server":
+                # DNS server security scan
+                self.log(f"Starting DNS server scan for command_id: {command_id}")
+                response = await self.run_dns_server_scan(command_id, command_data)
+                self.log(f"DNS server scan complete, success: {response.get('success')}")
+            
+            elif command == "dig":
+                # Dig DNS lookup
+                self.log(f"Starting dig lookup for command_id: {command_id}")
+                response = await self.run_dig_lookup(command_id, command_data)
+                self.log(f"Dig lookup complete, success: {response.get('success')}")
+            
+            elif command == "ip_reputation":
+                # IP reputation check
+                self.log(f"Starting IP reputation check for command_id: {command_id}")
+                response = await self.run_ip_reputation(command_id, command_data)
+                self.log(f"IP reputation check complete, success: {response.get('success')}")
+            
+            elif command == "domain_reputation":
+                # Domain reputation check
+                self.log(f"Starting domain reputation check for command_id: {command_id}")
+                response = await self.run_domain_reputation(command_id, command_data)
+                self.log(f"Domain reputation check complete, success: {response.get('success')}")
+            
+            elif command == "speedtest":
+                # Internet speed test
+                self.log(f"Starting speedtest for command_id: {command_id}")
+                response = await self.run_speedtest(command_id, command_data)
+                self.log(f"Speedtest complete, success: {response.get('success')}")
+            
             elif command == "capabilities":
                 # Return what this agent can do
                 response["data"] = {
-                    "commands": ["ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent"],
+                    "commands": ["ping", "host_ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "dns_server", "dig", "ip_reputation", "domain_reputation", "speedtest", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent", "restart"],
                     "nmap_available": shutil.which("nmap") is not None,
                     "nikto_available": shutil.which("nikto") is not None,
                     "dirb_available": shutil.which("dirb") is not None,
                     "sslscan_available": shutil.which("sslscan") is not None,
                     "gobuster_available": shutil.which("gobuster") is not None,
                     "whatweb_available": shutil.which("whatweb") is not None,
+                    "traceroute_available": shutil.which("traceroute") is not None,
+                    "dig_available": shutil.which("dig") is not None,
+                    "speedtest_available": shutil.which("speedtest-cli") is not None or shutil.which("speedtest") is not None,
                     "version": VERSION
                 }
             
@@ -1777,6 +3823,22 @@ class MicroHackAgent:
                 # Self-update the agent
                 response = await self.update_agent(command_id)
             
+            elif command == "restart":
+                # Restart the agent
+                self.log(f"Restart requested via command_id: {command_id}")
+                response["data"] = {
+                    "message": "Agent restarting...",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                # Send response before restarting
+                if self.ws:
+                    await self.ws.send(json.dumps(response))
+                # Schedule restart after a short delay
+                await asyncio.sleep(0.5)
+                self.log("Restarting agent...")
+                current_script = os.path.abspath(__file__)
+                os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
+            
             else:
                 response["success"] = False
                 response["error"] = f"Unknown command: {command}"
@@ -1793,6 +3855,40 @@ class MicroHackAgent:
             self.log(f"Sending response for command_id: {command_id}, size: {len(response_json)} bytes")
             await self.ws.send(response_json)
             self.log(f"Response sent successfully")
+    
+    async def _command_worker(self, worker_id: int):
+        """Worker that processes commands from the queue concurrently"""
+        self.log(f"Command worker {worker_id} started")
+        
+        while self.running and self.connected:
+            try:
+                # Get command from queue with timeout to check running flag
+                try:
+                    command_data = await asyncio.wait_for(
+                        self._command_queue.get(),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                
+                # Process the command
+                command = command_data.get("command", "unknown")
+                self.log(f"Worker {worker_id} executing: {command}")
+                
+                try:
+                    await self.handle_command(command_data)
+                except Exception as e:
+                    self.log(f"Worker {worker_id} command error: {e}", "ERROR")
+                
+                self._command_queue.task_done()
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.log(f"Worker {worker_id} error: {e}", "ERROR")
+                await asyncio.sleep(0.5)
+        
+        self.log(f"Command worker {worker_id} stopped")
     
     async def message_loop(self):
         """Main loop for receiving messages"""
@@ -1824,11 +3920,18 @@ class MicroHackAgent:
         """Main agent run loop with auto-reconnect"""
         self.running = True
         
+        # Create command queue
+        self._command_queue = asyncio.Queue()
+        
+        # Create installation lock
+        self._install_lock = asyncio.Lock()
+        
         self.log(f"micro-hack agent v{VERSION} starting...")
         self.log(f"Agent ID: {self.agent_id}")
         self.log(f"Hostname: {self.hostname}")
         self.log(f"OS: {self.os_info}")
         self.log(f"Local IP: {self.local_ip}")
+        self.log(f"Command workers: {self._num_workers}")
         
         if not self.api_key:
             self.log("ERROR: MICROHACK_API_KEY environment variable not set!", "ERROR")
@@ -1837,23 +3940,38 @@ class MicroHackAgent:
         while self.running:
             # Connect
             if await self.connect():
+                # Start command workers
+                self._worker_tasks = []
+                for i in range(self._num_workers):
+                    task = asyncio.create_task(self._command_worker(i))
+                    self._worker_tasks.append(task)
+                
                 # Start message and heartbeat loops
                 message_task = asyncio.create_task(self.message_loop())
                 heartbeat_task = asyncio.create_task(self.heartbeat_loop())
                 
-                # Wait for either to complete (connection closed)
+                # Wait for message or heartbeat to complete (connection closed)
                 done, pending = await asyncio.wait(
                     [message_task, heartbeat_task],
                     return_when=asyncio.FIRST_COMPLETED
                 )
                 
-                # Cancel pending tasks
+                # Cancel pending tasks (message/heartbeat)
                 for task in pending:
                     task.cancel()
                     try:
                         await task
                     except asyncio.CancelledError:
                         pass
+                
+                # Cancel worker tasks
+                for task in self._worker_tasks:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                self._worker_tasks = []
                 
                 # Close WebSocket
                 if self.ws:
