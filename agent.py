@@ -108,7 +108,7 @@ def auto_update_on_startup():
         new_version = None
         for line in new_code.split('\n'):
             if line.strip().startswith('VERSION = '):
-                # Handle both VERSION = "x.y.z" and VERSION = 'x.y.z'
+                # Handle both double and single quoted version strings
                 try:
                     new_version = line.split('"')[1]
                 except IndexError:
