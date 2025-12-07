@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.7.7"
+VERSION = "1.7.8"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -496,6 +496,54 @@ class MicroHackAgent:
         
         return False
     
+    def _is_running_in_docker(self) -> bool:
+        """Check if running inside a Docker container"""
+        # Check for .dockerenv file
+        if os.path.exists('/.dockerenv'):
+            return True
+        # Check cgroup for docker/containerd
+        try:
+            with open('/proc/1/cgroup', 'r') as f:
+                return 'docker' in f.read() or 'containerd' in f.read()
+        except:
+            pass
+        return False
+    
+    def _get_docker_host_ip(self) -> str:
+        """Get the Docker host's IP address from inside a container"""
+        # Try multiple methods to get the host IP
+        
+        # Method 1: Check HOST_IP environment variable (can be passed when running container)
+        host_ip = os.environ.get('HOST_IP') or os.environ.get('DOCKER_HOST_IP')
+        if host_ip:
+            return host_ip
+        
+        # Method 2: Use host.docker.internal (works on Docker Desktop for Mac/Windows)
+        try:
+            host_ip = socket.gethostbyname('host.docker.internal')
+            if host_ip and not host_ip.startswith('127.'):
+                return host_ip
+        except:
+            pass
+        
+        # Method 3: Get default gateway (usually the host on Linux Docker)
+        try:
+            with open('/proc/net/route', 'r') as f:
+                for line in f:
+                    fields = line.strip().split()
+                    if fields[1] == '00000000':  # Default route
+                        # Gateway is in hex, little-endian
+                        gateway_hex = fields[2]
+                        # Convert from hex to IP
+                        gateway_bytes = bytes.fromhex(gateway_hex)
+                        gateway_ip = '.'.join(str(b) for b in reversed(gateway_bytes))
+                        if gateway_ip and not gateway_ip.startswith('127.'):
+                            return gateway_ip
+        except:
+            pass
+        
+        return None
+    
     def _get_network_interfaces(self) -> list:
         """Detect network interfaces and their types (lan, wifi, docker, vpn, etc.)"""
         interfaces = []
@@ -565,6 +613,20 @@ class MicroHackAgent:
                     'type': iface_type,
                     'ip': ipv4
                 })
+            
+            # If running in Docker, try to add the host's IP
+            if self._is_running_in_docker():
+                host_ip = self._get_docker_host_ip()
+                if host_ip:
+                    # Check if we already have this IP (avoid duplicates)
+                    existing_ips = [i['ip'] for i in interfaces]
+                    if host_ip not in existing_ips:
+                        interfaces.append({
+                            'name': 'docker-host',
+                            'type': 'lan',  # Host's LAN IP
+                            'ip': host_ip
+                        })
+                
         except Exception as e:
             self.log(f"Error detecting network interfaces: {e}", "WARNING")
         

@@ -28,6 +28,10 @@ services:
       # Required: Your agent API key from micro-hack
       # Get this from: Settings > Agents > Create Key
       - MICROHACK_API_KEY=${MICROHACK_API_KEY:-mh_agent_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+      
+      # Optional: Pass host's LAN IP when not using network_mode: host
+      # Example: HOST_IP=192.168.1.100 docker-compose up -d
+      - HOST_IP=${HOST_IP:-}
     
     # Give the agent access to host network for full network scanning capabilities
     # This enables: SYN scans, OS detection, traceroute, scanning localhost, etc.
