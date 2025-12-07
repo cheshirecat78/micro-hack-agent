@@ -3609,21 +3609,18 @@ apt-get install -y speedtest
                 self._installing_tool = None
     
     async def check_tools_status(self) -> dict:
-        """Check which tools are installed and available"""
+        """Return all known tools with their installed status and info, for full UI display."""
+        import shutil, subprocess
         tools_status = {}
-        
         for tool_name, tool_info in TOOL_INSTALL_COMMANDS.items():
             check_cmd = tool_info["check"]
             is_installed = shutil.which(check_cmd) is not None
-            
-            # Try to get version if installed
             version = None
             if is_installed:
                 try:
                     if tool_name == "nmap":
                         result = subprocess.run(["nmap", "--version"], capture_output=True, text=True, timeout=5)
                         if result.returncode == 0:
-                            # Extract version from first line
                             version = result.stdout.split("\n")[0]
                     elif tool_name == "nikto":
                         result = subprocess.run(["nikto", "-Version"], capture_output=True, text=True, timeout=5)
@@ -3631,24 +3628,22 @@ apt-get install -y speedtest
                             version = result.stdout.strip()
                     elif tool_name == "dirb":
                         result = subprocess.run(["dirb"], capture_output=True, text=True, timeout=5)
-                        # dirb prints version in first line
                         if result.stdout:
                             first_line = result.stdout.split("\n")[0]
                             if "DIRB" in first_line:
                                 version = first_line.strip()
-                except:
-                    pass
-            
+                except Exception as e:
+                    print(f"[check_tools_status] Error getting version for {tool_name}: {e}")
             tools_status[tool_name] = {
                 "installed": is_installed,
                 "version": version,
                 "description": tool_info["description"],
                 "size": tool_info.get("size", "Unknown")
             }
-        
+        print(f"[check_tools_status] Reporting all tools: {list(tools_status.keys())}")
         return {
             "tools": tools_status,
-            "can_install": self._is_root()  # Check if running as root
+            "can_install": self._is_root()
         }
     
     async def install_tool(self, command_id: str, tool_name: str) -> dict:
