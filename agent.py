@@ -3640,7 +3640,16 @@ apt-get install -y speedtest
                 "description": tool_info["description"],
                 "size": tool_info.get("size", "Unknown")
             }
-        print(f"[check_tools_status] Reporting all tools: {list(tools_status.keys())}")
+        # Always return all known tools, even if none are installed
+        if not tools_status:
+            for tool_name, tool_info in TOOL_INSTALL_COMMANDS.items():
+                tools_status[tool_name] = {
+                    "installed": False,
+                    "version": None,
+                    "description": tool_info["description"],
+                    "size": tool_info.get("size", "Unknown")
+                }
+        print(f"[check_tools_status] FINAL tools_status: {json.dumps(tools_status, indent=2)}")
         return {
             "tools": tools_status,
             "can_install": self._is_root()
@@ -4205,8 +4214,10 @@ apt-get install -y speedtest
                 }
             
             elif command == "check_tools":
-                # Check which tools are installed
-                response["data"] = await self.check_tools_status()
+                # Check which tools are installed (always return all known tools)
+                tools_data = await self.check_tools_status()
+                print(f"[handle_command] check_tools response: {json.dumps(tools_data, indent=2)}")
+                response["data"] = tools_data
             
             elif command == "install_tool":
                 # Install a tool
