@@ -1117,7 +1117,14 @@ class MicroHackAgent:
         if scan_type in ("quick", "nmap_quick", "syn"):
             cmd.extend(["-T4", "-F"])  # Fast scan, top 100 ports
         elif scan_type in ("full", "nmap_full"):
-            cmd.extend(["-T4", "-A", "-p-"])  # All ports, version detection, scripts
+            # Perform an exhaustive/full scan:
+            # -sS : TCP SYN scan (stealth, faster and more complete)
+            # -sV : Version detection
+            # -O  : OS detection
+            # -p- : scan all ports
+            # -Pn : skip host discovery (treat host as up)
+            # --script default,vuln : run default and vuln scripts (may be slow)
+            cmd.extend(["-T4", "-sS", "-sV", "-O", "-Pn", "-p-", "--script", "default,vuln"])
         elif scan_type in ("ports", "connect"):
             cmd.extend(["-T4", "-sV"])  # Version detection
             if ports:
@@ -1156,67 +1163,119 @@ class MicroHackAgent:
             if "--stats-every" not in " ".join(cmd):
                 nmap_cmd.insert(1, "--stats-every")
                 nmap_cmd.insert(2, "5s")
-            
-            process = await asyncio.create_subprocess_exec(
-                *nmap_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            # Read stdout and stderr concurrently, parsing progress from stderr
-            stdout_data = b""
+
+            # Attempt to run; if -sS fails due to permission/raw socket errors,
+            # retry once with -sT (connect scan) as a fallback.
+            attempt = 0
+            max_attempts = 2
+            xml_output = ""
             stderr_data = b""
-            last_progress = 15
-            
-            async def read_stdout():
-                nonlocal stdout_data
-                stdout_data = await process.stdout.read()
-            
-            async def read_stderr_with_progress():
-                nonlocal stderr_data, last_progress
-                while True:
-                    line = await process.stderr.readline()
-                    if not line:
-                        break
-                    stderr_data += line
-                    line_str = line.decode("utf-8", errors="replace")
-                    
-                    # Parse nmap progress from stats output
-                    # Example: "Stats: 0:00:05 elapsed; 0 hosts completed (1 up), 1 undergoing SYN Stealth Scan"
-                    # Or: "SYN Stealth Scan Timing: About 45.67% done"
-                    if job_id and ("% done" in line_str or "About" in line_str):
-                        import re
-                        # Look for percentage
-                        percent_match = re.search(r'(\d+(?:\.\d+)?)\s*%\s*done', line_str)
-                        if percent_match:
-                            percent = float(percent_match.group(1))
-                            # Map 0-100% to 20-90% for the job progress
-                            progress = int(20 + (percent * 0.7))
-                            if progress > last_progress:
-                                last_progress = progress
-                                await self.send_job_progress(job_id, progress, f"Scanning {target}... {int(percent)}% complete")
-            
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(read_stdout(), read_stderr_with_progress()),
-                    timeout=600  # 10 minute timeout for scans
+            fallback_used = False
+
+            while attempt < max_attempts:
+                attempt += 1
+
+                process = await asyncio.create_subprocess_exec(
+                    *nmap_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
                 )
-            except asyncio.TimeoutError:
-                process.kill()
-                raise
-            
-            await process.wait()
-            
-            xml_output = stdout_data.decode("utf-8", errors="replace")
-            
-            if process.returncode != 0:
-                error_msg = stderr_data.decode("utf-8", errors="replace")
-                self.log(f"nmap error: {error_msg}", "ERROR")
-                # Still try to parse partial results if any
-                if not xml_output or "<nmaprun" not in xml_output:
-                    response["success"] = False
-                    response["error"] = f"nmap failed: {error_msg}"
-                    return response
+
+                # Read stdout and stderr concurrently, parsing progress from stderr
+                stdout_data = b""
+                stderr_data = b""
+                last_progress = 15
+
+                async def read_stdout():
+                    nonlocal stdout_data
+                    stdout_data = await process.stdout.read()
+
+                async def read_stderr_with_progress():
+                    nonlocal stderr_data, last_progress
+                    while True:
+                        line = await process.stderr.readline()
+                        if not line:
+                            break
+                        stderr_data += line
+                        line_str = line.decode("utf-8", errors="replace")
+                        # Debug: log stderr lines so we can see nmap progress output
+                        try:
+                            self.log(f"nmap stderr: {line_str.strip()}", "DEBUG")
+                        except Exception:
+                            pass
+
+                        # Parse nmap progress from stats output
+                        if job_id:
+                            import re
+                            # Try to match explicit percent patterns first
+                            percent_match = re.search(r'(\d+(?:\.\d+)?)\s*%\s*done', line_str)
+                            if percent_match:
+                                percent = float(percent_match.group(1))
+                                progress = int(20 + (percent * 0.7))
+                                if progress > last_progress:
+                                    last_progress = progress
+                                    await self.send_job_progress(job_id, progress, f"Scanning {target}... {int(percent)}% complete")
+                                continue
+
+                            # Match 'About X% done' without the '%' token capture
+                            about_match = re.search(r'About\s+(\d+(?:\.\d+)?)\s*%?\s*done', line_str, re.IGNORECASE)
+                            if about_match:
+                                percent = float(about_match.group(1))
+                                progress = int(20 + (percent * 0.7))
+                                if progress > last_progress:
+                                    last_progress = progress
+                                    await self.send_job_progress(job_id, progress, f"Scanning {target}... {int(percent)}% complete")
+                                continue
+
+                            # Try to parse 'Stats:' lines for approximate progress by searching for 'hosts completed' messages
+                            stats_match = re.search(r'([0-9]+) hosts completed', line_str)
+                            if stats_match:
+                                try:
+                                    completed = int(stats_match.group(1))
+                                    # Heuristic: map completed hosts to progress (bounded)
+                                    # This is approximate; we map completed -> progress up to 85%
+                                    progress = min(85, 20 + completed)
+                                    if progress > last_progress:
+                                        last_progress = progress
+                                        await self.send_job_progress(job_id, progress, f"Scanning {target}... hosts completed: {completed}")
+                                except Exception:
+                                    pass
+
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(read_stdout(), read_stderr_with_progress()),
+                        timeout=600  # 10 minute timeout for scans
+                    )
+                except asyncio.TimeoutError:
+                    process.kill()
+                    raise
+
+                await process.wait()
+
+                xml_output = stdout_data.decode("utf-8", errors="replace")
+                stderr_text = stderr_data.decode("utf-8", errors="replace")
+
+                # If nmap returned non-zero and indicates raw socket/permission errors, retry with -sT
+                if process.returncode != 0:
+                    self.log(f"nmap error (attempt {attempt}): {stderr_text}", "WARNING")
+                    # Check for common permission/raw socket error messages
+                    perm_errors = ["operation not permitted", "can't open raw socket", "raw socket", "requires root", "permission denied"]
+                    if any(err in stderr_text.lower() for err in perm_errors) and "-sS" in nmap_cmd and not fallback_used:
+                        # Replace -sS with -sT and retry once
+                        nmap_cmd = [("-sT" if a == "-sS" else a) for a in nmap_cmd]
+                        fallback_used = True
+                        self.log("nmap -sS failed due to permissions, retrying with -sT (connect scan)", "INFO")
+                        # small pause before retry
+                        await asyncio.sleep(0.5)
+                        continue
+                    else:
+                        # Still try to parse partial results if any
+                        if not xml_output or "<nmaprun" not in xml_output:
+                            response["success"] = False
+                            response["error"] = f"nmap failed: {stderr_text}"
+                            return response
+                # If success or no fatal error, break loop
+                break
             
             # Send final progress
             if job_id:
