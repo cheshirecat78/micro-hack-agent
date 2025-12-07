@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.7.3"
+VERSION = "1.7.4"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -530,20 +530,33 @@ class MicroHackAgent:
                 iface_lower = iface_name.lower()
                 iface_type = 'lan'  # default
                 
-                # Docker interfaces
-                if 'docker' in iface_lower or 'br-' in iface_lower or iface_lower.startswith('veth'):
+                # Docker interfaces (check first - most specific)
+                if 'docker' in iface_lower or iface_lower.startswith('veth'):
                     iface_type = 'docker'
-                # WiFi interfaces
-                elif any(w in iface_lower for w in ['wlan', 'wifi', 'wl', 'wireless', 'wi-fi', 'airport']):
+                # Bridge interfaces used by Docker (br-xxxxx)
+                elif iface_lower.startswith('br-'):
+                    iface_type = 'docker'
+                # WiFi interfaces (various naming conventions)
+                elif any(w in iface_lower for w in ['wlan', 'wifi', 'wlp', 'wlx', 'wireless', 'wi-fi', 'airport']):
                     iface_type = 'wifi'
                 # VPN interfaces
-                elif any(v in iface_lower for v in ['tun', 'tap', 'vpn', 'wg', 'wireguard', 'ppp', 'utun']):
+                elif any(v in iface_lower for v in ['tun', 'tap', 'vpn', 'wg', 'wireguard', 'ppp', 'utun', 'tailscale']):
                     iface_type = 'vpn'
                 # Virtual/VM interfaces
-                elif any(v in iface_lower for v in ['vmnet', 'vbox', 'virbr', 'vnic']):
+                elif any(v in iface_lower for v in ['vmnet', 'vbox', 'virbr', 'vnic', 'vmware']):
                     iface_type = 'virtual'
-                # Ethernet/LAN (default for eth, en, etc.)
-                elif any(e in iface_lower for e in ['eth', 'en0', 'en1', 'eno', 'enp', 'em']):
+                # Known LAN/Ethernet interface naming patterns
+                # eth0, eth1, en0, en1, eno1, enp0s3, ens33, enx..., em1, bond0, br0
+                elif any(e in iface_lower for e in ['eth', 'eno', 'enp', 'ens', 'enx', 'em', 'bond']):
+                    iface_type = 'lan'
+                # macOS ethernet (en0, en1, etc. - but not "enabled" etc.)
+                elif iface_lower.startswith('en') and len(iface_lower) <= 4 and iface_lower[2:].isdigit():
+                    iface_type = 'lan'
+                # Linux bridge interfaces (for bridged VMs, etc.) - NOT docker bridges
+                elif iface_lower.startswith('br') and not iface_lower.startswith('br-'):
+                    iface_type = 'lan'  # Regular bridge is considered part of LAN
+                # Default: if IP is in private range and not matched, assume LAN
+                elif ipv4.startswith(('10.', '192.168.', '172.')):
                     iface_type = 'lan'
                 
                 interfaces.append({
