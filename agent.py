@@ -3983,12 +3983,51 @@ apt-get install -y speedtest
         return response
     
     async def handle_command(self, data: dict):
+                # Handler stubs for new nmap command variants
+                async def run_nmap_quick_scan(command_id, command_data):
+                    command_data = dict(command_data)
+                    command_data["scan_type"] = "quick"
+                    return await self.run_nmap_scan(command_id, command_data)
+
+                async def run_nmap_normal_scan(command_id, command_data):
+                    command_data = dict(command_data)
+                    command_data["scan_type"] = "normal"
+                    return await self.run_nmap_scan(command_id, command_data)
+
+                async def run_nmap_thorough_scan(command_id, command_data):
+                    command_data = dict(command_data)
+                    command_data["scan_type"] = "thorough"
+                    return await self.run_nmap_scan(command_id, command_data)
+
+                async def run_nmap_vulns_scan(command_id, command_data):
+                    command_data = dict(command_data)
+                    command_data["scan_type"] = "vuln"
+                    return await self.run_nmap_scan(command_id, command_data)
+
+                # Attach to self for handler use
+                self.run_nmap_quick_scan = run_nmap_quick_scan
+                self.run_nmap_normal_scan = run_nmap_normal_scan
+                self.run_nmap_thorough_scan = run_nmap_thorough_scan
+                self.run_nmap_vulns_scan = run_nmap_vulns_scan
         """Handle a command from the server"""
         command_id = data.get("command_id")
         command = data.get("command")
         command_data = data.get("data", {})
-        
-        self.log(f"Received command: {command}")
+
+        # Standardize command names and provide aliases for backward compatibility
+        command_aliases = {
+            "nmap_network": "nmap",
+            "nmap_quick": "nmap_quick",
+            "nmap_normal": "nmap_normal",
+            "nmap_thorough": "nmap_thorough",
+            "nmap_vulns": "nmap_vulns",
+            "dirb": "dirb",
+            "nikto": "nikto",
+            # Add more aliases as needed
+        }
+        # Map old/alias command to new short name
+        command_std = command_aliases.get(command, command)
+        self.log(f"Received command: {command_std}")
         
         response = {
             "type": "response",
@@ -3998,19 +4037,16 @@ apt-get install -y speedtest
         }
         
         try:
-            if command == "ping":
+            if command_std == "ping":
                 response["data"] = {
                     "message": "pong",
                     "timestamp": datetime.utcnow().isoformat()
                 }
-            
-            elif command == "host_ping":
-                # Run actual ping on a target host
-                self.log(f"Starting host ping for command_id: {command_id}")
+            elif command_std == "host_ping":
+                self.log(f"Starting host_ping for command_id: {command_id}")
                 response = await self.run_host_ping(command_id, command_data)
-                self.log(f"Host ping complete, success: {response.get('success')}")
-            
-            elif command == "info":
+                self.log(f"host_ping complete, success: {response.get('success')}")
+            elif command_std == "info":
                 response["data"] = {
                     "agent_id": self.agent_id,
                     "hostname": self.hostname,
@@ -4021,63 +4057,56 @@ apt-get install -y speedtest
                     "version": VERSION,
                     "python_version": platform.python_version()
                 }
-            
-            elif command == "echo":
-                # Echo back the data
+            elif command_std == "echo":
                 response["data"] = {
                     "echo": command_data.get("message", ""),
                     "timestamp": datetime.utcnow().isoformat()
                 }
-            
-            elif command == "nmap":
-                # Run nmap scan
-                self.log(f"Starting nmap scan for command_id: {command_id}")
+            elif command_std == "nmap":
+                self.log(f"Starting nmap for command_id: {command_id}")
                 response = await self.run_nmap_scan(command_id, command_data)
-                self.log(f"Nmap scan complete, success: {response.get('success')}")
-            
-            elif command == "nmap_network":
-                # Alias for nmap scan
-                self.log(f"Starting nmap_network scan for command_id: {command_id}")
-                response = await self.run_nmap_scan(command_id, command_data)
-                self.log(f"nmap_network scan complete, success: {response.get('success')}")
-            
-            elif command == "nikto":
-                # Run nikto web vulnerability scan
-                self.log(f"Starting nikto scan for command_id: {command_id}")
+                self.log(f"nmap complete, success: {response.get('success')}")
+            elif command_std == "nmap_quick":
+                self.log(f"Starting nmap_quick for command_id: {command_id}")
+                response = await self.run_nmap_quick_scan(command_id, command_data)
+                self.log(f"nmap_quick complete, success: {response.get('success')}")
+            elif command_std == "nmap_normal":
+                self.log(f"Starting nmap_normal for command_id: {command_id}")
+                response = await self.run_nmap_normal_scan(command_id, command_data)
+                self.log(f"nmap_normal complete, success: {response.get('success')}")
+            elif command_std == "nmap_thorough":
+                self.log(f"Starting nmap_thorough for command_id: {command_id}")
+                response = await self.run_nmap_thorough_scan(command_id, command_data)
+                self.log(f"nmap_thorough complete, success: {response.get('success')}")
+            elif command_std == "nmap_vulns":
+                self.log(f"Starting nmap_vulns for command_id: {command_id}")
+                response = await self.run_nmap_vulns_scan(command_id, command_data)
+                self.log(f"nmap_vulns complete, success: {response.get('success')}")
+            elif command_std == "nikto":
+                self.log(f"Starting nikto for command_id: {command_id}")
                 response = await self.run_nikto_scan(command_id, command_data)
-                self.log(f"Nikto scan complete, success: {response.get('success')}")
-            
-            elif command == "dirb":
-                # Run dirb directory scan
-                self.log(f"Starting dirb scan for command_id: {command_id}")
+                self.log(f"nikto complete, success: {response.get('success')}")
+            elif command_std == "dirb":
+                self.log(f"Starting dirb for command_id: {command_id}")
                 response = await self.run_dirb_scan(command_id, command_data)
-                self.log(f"Dirb scan complete, success: {response.get('success')}")
-            
-            elif command == "sslscan":
-                # Run SSL/TLS scan
+                self.log(f"dirb complete, success: {response.get('success')}")
+            elif command_std == "sslscan":
                 self.log(f"Starting sslscan for command_id: {command_id}")
                 response = await self.run_sslscan(command_id, command_data)
-                self.log(f"SSLscan complete, success: {response.get('success')}")
-            
-            elif command == "gobuster":
-                # Run gobuster directory scan
-                self.log(f"Starting gobuster scan for command_id: {command_id}")
+                self.log(f"sslscan complete, success: {response.get('success')}")
+            elif command_std == "gobuster":
+                self.log(f"Starting gobuster for command_id: {command_id}")
                 response = await self.run_gobuster_scan(command_id, command_data)
-                self.log(f"Gobuster scan complete, success: {response.get('success')}")
-            
-            elif command == "whatweb":
-                # Run whatweb fingerprinting scan
-                self.log(f"Starting whatweb scan for command_id: {command_id}")
+                self.log(f"gobuster complete, success: {response.get('success')}")
+            elif command_std == "whatweb":
+                self.log(f"Starting whatweb for command_id: {command_id}")
                 response = await self.run_whatweb_scan(command_id, command_data)
-                self.log(f"WhatWeb scan complete, success: {response.get('success')}")
-            
-            elif command == "traceroute":
-                # Run visual traceroute
+                self.log(f"whatweb complete, success: {response.get('success')}")
+            elif command_std == "traceroute":
                 self.log(f"Starting traceroute for command_id: {command_id}")
                 response = await self.run_traceroute(command_id, command_data)
-                self.log(f"Traceroute complete, success: {response.get('success')}")
-            
-            elif command == "ssh_audit":
+                self.log(f"traceroute complete, success: {response.get('success')}")
+            elif command_std == "ssh_audit":
                 # Run SSH audit
                 self.log(f"Starting SSH audit for command_id: {command_id}")
                 response = await self.run_ssh_audit(command_id, command_data)
