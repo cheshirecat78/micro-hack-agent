@@ -3990,33 +3990,34 @@ apt-get install -y speedtest
         return response
     
     async def handle_command(self, data: dict):
-                # Handler stubs for new nmap command variants
-                async def run_nmap_quick_scan(command_id, command_data):
-                    command_data = dict(command_data)
-                    command_data["scan_type"] = "quick"
-                    return await self.run_nmap_scan(command_id, command_data)
-
-                async def run_nmap_normal_scan(command_id, command_data):
-                    command_data = dict(command_data)
-                    command_data["scan_type"] = "normal"
-                    return await self.run_nmap_scan(command_id, command_data)
-
-                async def run_nmap_thorough_scan(command_id, command_data):
-                    command_data = dict(command_data)
-                    command_data["scan_type"] = "thorough"
-                    return await self.run_nmap_scan(command_id, command_data)
-
-                async def run_nmap_vulns_scan(command_id, command_data):
-                    command_data = dict(command_data)
-                    command_data["scan_type"] = "vuln"
-                    return await self.run_nmap_scan(command_id, command_data)
-
-                # Attach to self for handler use
-                self.run_nmap_quick_scan = run_nmap_quick_scan
-                self.run_nmap_normal_scan = run_nmap_normal_scan
-                self.run_nmap_thorough_scan = run_nmap_thorough_scan
-                self.run_nmap_vulns_scan = run_nmap_vulns_scan
         """Handle a command from the server"""
+        # Handler stubs for new nmap command variants
+        async def run_nmap_quick_scan(command_id, command_data):
+            command_data = dict(command_data)
+            command_data["scan_type"] = "quick"
+            return await self.run_nmap_scan(command_id, command_data)
+
+        async def run_nmap_normal_scan(command_id, command_data):
+            command_data = dict(command_data)
+            command_data["scan_type"] = "normal"
+            return await self.run_nmap_scan(command_id, command_data)
+
+        async def run_nmap_thorough_scan(command_id, command_data):
+            command_data = dict(command_data)
+            command_data["scan_type"] = "thorough"
+            return await self.run_nmap_scan(command_id, command_data)
+
+        async def run_nmap_vulns_scan(command_id, command_data):
+            command_data = dict(command_data)
+            command_data["scan_type"] = "vuln"
+            return await self.run_nmap_scan(command_id, command_data)
+
+        # Attach to self for handler use
+        self.run_nmap_quick_scan = run_nmap_quick_scan
+        self.run_nmap_normal_scan = run_nmap_normal_scan
+        self.run_nmap_thorough_scan = run_nmap_thorough_scan
+        self.run_nmap_vulns_scan = run_nmap_vulns_scan
+
         command_id = data.get("command_id")
         command = data.get("command")
         command_data = data.get("data", {})
