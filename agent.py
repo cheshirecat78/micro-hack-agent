@@ -407,7 +407,6 @@ TOOL_INSTALL_COMMANDS = {
 # Configuration from environment
 SERVER_URL = os.environ.get("MICROHACK_SERVER_URL", "ws://localhost:8000")
 API_KEY = os.environ.get("MICROHACK_API_KEY", "")
-IS_LOCAL_AGENT = os.environ.get("MICROHACK_IS_LOCAL", "false").lower() in ("true", "1", "yes")
 
 # Reconnection settings
 RECONNECT_DELAY = 5  # seconds
@@ -750,8 +749,6 @@ class MicroHackAgent:
         if not self.ws:
             return
         
-        # Note: is_local is informational only - the server ignores it for security
-        # The is_local status is set by admins via the web UI, not by the agent
         registration = {
             "type": "register",
             "data": {
@@ -770,9 +767,8 @@ class MicroHackAgent:
         }
         
         await self.ws.send(json.dumps(registration))
-        local_str = " [LOCAL]" if IS_LOCAL_AGENT else ""
         loc_str = f" @ {self.location.get('city')}, {self.location.get('country')}" if self.location else ""
-        self.log(f"Registered as {self.hostname} ({self.os_info}){loc_str}{local_str}")
+        self.log(f"Registered as {self.hostname} ({self.os_info}){loc_str}")
     
     def get_system_metrics(self) -> dict:
         """Collect system metrics using psutil"""
