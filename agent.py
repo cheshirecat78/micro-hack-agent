@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -4030,11 +4030,14 @@ apt-get install -y speedtest
             "nmap_vulns": "nmap_vulns",
             "dirb": "dirb",
             "nikto": "nikto",
+            "ssh-audit": "ssh_audit",
             # Add more aliases as needed
         }
-        # Map old/alias command to new short name
+        # Map old/alias command to new short name and normalize the command
         command_std = command_aliases.get(command, command)
-        self.log(f"Received command: {command_std}")
+        # Ensure the rest of the function uses the standardized name
+        command = command_std
+        self.log(f"Received command: {command}")
         
         response = {
             "type": "response",
