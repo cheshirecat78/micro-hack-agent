@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -518,8 +518,14 @@ class MicroHackAgent:
         if host_ip:
             return host_ip
         
-        # Method 2: Query host's default route IP via HTTP to self (when on host network)
-        # Skip if we don't have host network access
+        # Method 2: Use 'ip route' command to get default gateway (very reliable on Linux)
+        try:
+            result = subprocess.check_output("ip route | awk '/default/ {print $3}'", shell=True, timeout=5)
+            gateway = result.decode().strip()
+            if gateway and not gateway.startswith('127.'):
+                return gateway
+        except:
+            pass
         
         # Method 3: Use host.docker.internal (works on Docker Desktop for Mac/Windows)
         try:
@@ -529,8 +535,7 @@ class MicroHackAgent:
         except:
             pass
         
-        # Method 4: Get default gateway (usually the host on Linux Docker)
-        # This gives us the docker bridge IP, not the host's LAN IP
+        # Method 4: Get default gateway from /proc/net/route (fallback for Linux)
         gateway_ip = None
         try:
             with open('/proc/net/route', 'r') as f:
