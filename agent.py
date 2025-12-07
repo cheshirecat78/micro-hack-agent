@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.7.2"
+VERSION = "1.7.3"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(

@@ -29,12 +29,13 @@ services:
       # Get this from: Settings > Agents > Create Key
       - MICROHACK_API_KEY=${MICROHACK_API_KEY:-mh_agent_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
     
+    # Give the agent access to host network for full network scanning capabilities
+    # This enables: SYN scans, OS detection, traceroute, scanning localhost, etc.
+    network_mode: host
+    
     # Optional: Mount volumes if the agent needs access to host files
     # volumes:
     #   - /var/log:/host/logs:ro
-    
-    # Optional: Give the agent access to host network for network scanning
-    # network_mode: host
     
     # Optional: Resource limits
     # deploy:
