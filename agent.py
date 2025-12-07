@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.7.6"
+VERSION = "1.7.7"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -782,6 +782,26 @@ class MicroHackAgent:
         except Exception as e:
             self.log(f"Failed to send hop update: {e}", "WARNING")
     
+    async def send_job_progress(self, job_id: str, progress: int, message: str = ""):
+        """Send job progress update to the server for real-time UI updates"""
+        if not self.ws or not job_id:
+            return
+        
+        progress_update = {
+            "type": "job_progress",
+            "job_id": job_id,
+            "progress": progress,
+            "message": message,
+            "agent_id": self.agent_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        try:
+            await self.ws.send(json.dumps(progress_update))
+            self.log(f"Job {job_id[:8]} progress: {progress}% - {message}", "DEBUG")
+        except Exception as e:
+            self.log(f"Failed to send job progress: {e}", "WARNING")
+    
     async def handle_message(self, message: str):
         """Handle incoming message from server"""
         try:
@@ -1034,29 +1054,85 @@ class MicroHackAgent:
         
         self.log(f"Running nmap scan: {' '.join(cmd)}")
         
+        # Get job_id for progress updates
+        job_id = command_data.get("job_id")
+        
         try:
-            # Run nmap asynchronously
+            # Send initial progress
+            if job_id:
+                await self.send_job_progress(job_id, 15, f"Starting {scan_type} scan on {target}...")
+            
+            # Run nmap asynchronously with stats output for progress
+            # Add --stats-every to get periodic progress updates
+            nmap_cmd = cmd.copy()
+            if "--stats-every" not in " ".join(cmd):
+                nmap_cmd.insert(1, "--stats-every")
+                nmap_cmd.insert(2, "5s")
+            
             process = await asyncio.create_subprocess_exec(
-                *cmd,
+                *nmap_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=600  # 10 minute timeout for scans
-            )
+            # Read stdout and stderr concurrently, parsing progress from stderr
+            stdout_data = b""
+            stderr_data = b""
+            last_progress = 15
             
-            xml_output = stdout.decode("utf-8", errors="replace")
+            async def read_stdout():
+                nonlocal stdout_data
+                stdout_data = await process.stdout.read()
+            
+            async def read_stderr_with_progress():
+                nonlocal stderr_data, last_progress
+                while True:
+                    line = await process.stderr.readline()
+                    if not line:
+                        break
+                    stderr_data += line
+                    line_str = line.decode("utf-8", errors="replace")
+                    
+                    # Parse nmap progress from stats output
+                    # Example: "Stats: 0:00:05 elapsed; 0 hosts completed (1 up), 1 undergoing SYN Stealth Scan"
+                    # Or: "SYN Stealth Scan Timing: About 45.67% done"
+                    if job_id and ("% done" in line_str or "About" in line_str):
+                        import re
+                        # Look for percentage
+                        percent_match = re.search(r'(\d+(?:\.\d+)?)\s*%\s*done', line_str)
+                        if percent_match:
+                            percent = float(percent_match.group(1))
+                            # Map 0-100% to 20-90% for the job progress
+                            progress = int(20 + (percent * 0.7))
+                            if progress > last_progress:
+                                last_progress = progress
+                                await self.send_job_progress(job_id, progress, f"Scanning {target}... {int(percent)}% complete")
+            
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(read_stdout(), read_stderr_with_progress()),
+                    timeout=600  # 10 minute timeout for scans
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                raise
+            
+            await process.wait()
+            
+            xml_output = stdout_data.decode("utf-8", errors="replace")
             
             if process.returncode != 0:
-                error_msg = stderr.decode("utf-8", errors="replace")
+                error_msg = stderr_data.decode("utf-8", errors="replace")
                 self.log(f"nmap error: {error_msg}", "ERROR")
                 # Still try to parse partial results if any
                 if not xml_output or "<nmaprun" not in xml_output:
                     response["success"] = False
                     response["error"] = f"nmap failed: {error_msg}"
                     return response
+            
+            # Send final progress
+            if job_id:
+                await self.send_job_progress(job_id, 95, "Parsing scan results...")
             
             # Parse XML to JSON
             hosts = self.parse_nmap_xml(xml_output)
@@ -1213,19 +1289,60 @@ class MicroHackAgent:
         
         self.log(f"Running nikto scan: {' '.join(cmd)}")
         
+        # Get job_id for progress updates
+        job_id = command_data.get("job_id")
+        
         try:
+            # Send initial progress
+            if job_id:
+                await self.send_job_progress(job_id, 15, f"Starting Nikto scan on {target}:{port}...")
+            
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=1800  # 30 minute timeout for nikto
-            )
+            # Read stderr for progress updates (nikto outputs to stderr)
+            stdout_data = b""
+            stderr_data = b""
+            items_found = 0
             
-            output = stdout.decode("utf-8", errors="replace")
+            async def read_stdout():
+                nonlocal stdout_data
+                stdout_data = await process.stdout.read()
+            
+            async def read_stderr_with_progress():
+                nonlocal stderr_data, items_found
+                while True:
+                    line = await process.stderr.readline()
+                    if not line:
+                        break
+                    stderr_data += line
+                    line_str = line.decode("utf-8", errors="replace")
+                    
+                    # Count items found and update progress
+                    if job_id and ("+ " in line_str or "OSVDB" in line_str):
+                        items_found += 1
+                        # Update every 5 items
+                        if items_found % 5 == 0:
+                            await self.send_job_progress(job_id, min(85, 20 + items_found), f"Scanning... {items_found} items checked")
+            
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(read_stdout(), read_stderr_with_progress()),
+                    timeout=1800  # 30 minute timeout for nikto
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                raise
+            
+            await process.wait()
+            
+            if job_id:
+                await self.send_job_progress(job_id, 90, "Parsing scan results...")
+            
+            output = stdout_data.decode("utf-8", errors="replace")
             
             # Parse JSON output if possible
             findings = []
@@ -1308,40 +1425,77 @@ class MicroHackAgent:
         
         self.log(f"Running dirb scan: {' '.join(cmd)}")
         
+        # Get job_id for progress updates
+        job_id = command_data.get("job_id")
+        
         try:
+            # Send initial progress
+            if job_id:
+                await self.send_job_progress(job_id, 15, f"Starting directory scan on {target}...")
+            
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=1800  # 30 minute timeout
-            )
-            
-            output = stdout.decode("utf-8", errors="replace")
-            
-            # Parse dirb output
+            # Read stdout for results and progress
+            output_lines = []
             directories = []
-            for line in output.split("\n"):
-                line = line.strip()
-                if line.startswith("+ ") or line.startswith("==> DIRECTORY: "):
-                    # Extract URL
-                    if line.startswith("+ "):
-                        parts = line[2:].split(" ")
-                        if parts:
+            items_checked = 0
+            
+            async def read_stdout_with_progress():
+                nonlocal output_lines, directories, items_checked
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    line_str = line.decode("utf-8", errors="replace").strip()
+                    output_lines.append(line_str)
+                    
+                    # Parse results as they come in
+                    if line_str.startswith("+ ") or line_str.startswith("==> DIRECTORY: "):
+                        if line_str.startswith("+ "):
+                            parts = line_str[2:].split(" ")
+                            if parts:
+                                directories.append({
+                                    "url": parts[0],
+                                    "type": "file",
+                                    "status": parts[1] if len(parts) > 1 else ""
+                                })
+                        else:
+                            url = line_str.replace("==> DIRECTORY: ", "").strip()
                             directories.append({
-                                "url": parts[0],
-                                "type": "file",
-                                "status": parts[1] if len(parts) > 1 else ""
+                                "url": url,
+                                "type": "directory"
                             })
-                    else:
-                        url = line.replace("==> DIRECTORY: ", "").strip()
-                        directories.append({
-                            "url": url,
-                            "type": "directory"
-                        })
+                        
+                        # Update progress when finding items
+                        if job_id and len(directories) % 3 == 0:
+                            await self.send_job_progress(job_id, min(85, 25 + len(directories)), f"Found {len(directories)} items...")
+                    
+                    # Track tested words for progress
+                    if "TESTED:" in line_str or "Testing:" in line_str.lower():
+                        items_checked += 1
+                        if job_id and items_checked % 100 == 0:
+                            await self.send_job_progress(job_id, min(80, 20 + (items_checked // 50)), f"Testing... {items_checked} words checked")
+            
+            async def read_stderr():
+                await process.stderr.read()
+            
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(read_stdout_with_progress(), read_stderr()),
+                    timeout=1800  # 30 minute timeout
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                raise
+            
+            await process.wait()
+            
+            if job_id:
+                await self.send_job_progress(job_id, 95, "Finishing scan...")
             
             response["data"] = {
                 "target": target,
@@ -1555,43 +1709,71 @@ class MicroHackAgent:
         
         self.log(f"Running gobuster scan: {' '.join(cmd)}")
         
+        # Get job_id for progress updates
+        job_id = command_data.get("job_id")
+        
         try:
+            # Send initial progress
+            if job_id:
+                await self.send_job_progress(job_id, 15, f"Starting Gobuster scan on {target}...")
+            
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=1800  # 30 minute timeout
-            )
-            
-            output = stdout.decode("utf-8", errors="replace")
-            
-            # Parse gobuster output
+            # Read stdout for results
             entries = []
-            for line in output.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                # Format: /path (Status: 200) [Size: 1234]
-                if "(Status:" in line:
-                    parts = line.split(" ")
-                    if parts:
-                        path = parts[0]
-                        status = ""
-                        size = ""
-                        for i, p in enumerate(parts):
-                            if p == "(Status:":
-                                status = parts[i + 1].rstrip(")")
-                            if p == "[Size:":
-                                size = parts[i + 1].rstrip("]")
-                        entries.append({
-                            "path": path,
-                            "status": status,
-                            "size": size
-                        })
+            
+            async def read_stdout_with_progress():
+                nonlocal entries
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    line_str = line.decode("utf-8", errors="replace").strip()
+                    if not line_str:
+                        continue
+                    
+                    # Parse results: /path (Status: 200) [Size: 1234]
+                    if "(Status:" in line_str:
+                        parts = line_str.split(" ")
+                        if parts:
+                            path = parts[0]
+                            status = ""
+                            size = ""
+                            for i, p in enumerate(parts):
+                                if p == "(Status:":
+                                    status = parts[i + 1].rstrip(")")
+                                if p == "[Size:":
+                                    size = parts[i + 1].rstrip("]")
+                            entries.append({
+                                "path": path,
+                                "status": status,
+                                "size": size
+                            })
+                            
+                            # Update progress when finding items
+                            if job_id and len(entries) % 5 == 0:
+                                await self.send_job_progress(job_id, min(85, 25 + len(entries)), f"Found {len(entries)} entries...")
+            
+            async def read_stderr():
+                await process.stderr.read()
+            
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(read_stdout_with_progress(), read_stderr()),
+                    timeout=1800  # 30 minute timeout
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                raise
+            
+            await process.wait()
+            
+            if job_id:
+                await self.send_job_progress(job_id, 95, "Finishing scan...")
             
             response["data"] = {
                 "target": target,
