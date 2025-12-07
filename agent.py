@@ -169,6 +169,14 @@ auto_update_on_startup()
 # Supported tools and their install commands (Debian/Ubuntu based)
 # Note: Some tools require additional setup or alternative installation methods
 TOOL_INSTALL_COMMANDS = {
+    "iputils-ping": {
+        "check": "ping",
+        "install": ["apt-get", "install", "-y", "iputils-ping"],
+        "uninstall": ["apt-get", "remove", "-y", "iputils-ping"],
+        "description": "ICMP ping utility",
+        "size": "0.1 MB",
+        "pre_install": None
+    },
     "nmap": {
         "check": "nmap",
         "install": ["apt-get", "install", "-y", "nmap"],
@@ -730,6 +738,28 @@ class MicroHackAgent:
         
         await self.ws.send(json.dumps(heartbeat))
     
+    async def send_traceroute_hop(self, command_id: str, host_id: str, job_id: str, target: str, hop: dict):
+        """Send a live traceroute hop update to the server for real-time UI updates"""
+        if not self.ws:
+            return
+        
+        hop_update = {
+            "type": "traceroute_hop",
+            "command_id": command_id,
+            "host_id": host_id,
+            "job_id": job_id,
+            "target": target,
+            "hop": hop,
+            "agent_id": self.agent_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        try:
+            await self.ws.send(json.dumps(hop_update))
+            self.log(f"Sent hop {hop.get('hop')} update", "DEBUG")
+        except Exception as e:
+            self.log(f"Failed to send hop update: {e}", "WARNING")
+    
     async def handle_message(self, message: str):
         """Handle incoming message from server"""
         try:
@@ -793,8 +823,18 @@ class MicroHackAgent:
         if count > 100:
             count = 100  # Limit to 100 pings
         
-        # Build ping command based on OS
+        # Check if ping is installed, auto-install if needed (Linux only)
         is_windows = platform.system().lower() == "windows"
+        if not is_windows:
+            installed, install_msg = await self.ensure_tool_installed("iputils-ping")
+            if not installed:
+                response["success"] = False
+                response["error"] = install_msg
+                return response
+            if install_msg == "installed":
+                response["data"]["auto_installed"] = "iputils-ping"
+        
+        # Build ping command based on OS
         if is_windows:
             cmd = ["ping", "-n", str(count), target]
         else:
@@ -1646,7 +1686,7 @@ class MicroHackAgent:
         return response
     
     async def run_traceroute(self, command_id: str, command_data: dict) -> dict:
-        """Run a visual traceroute to a target"""
+        """Run a visual traceroute to a target with live hop streaming"""
         response = {
             "type": "response",
             "command_id": command_id,
@@ -1673,11 +1713,13 @@ class MicroHackAgent:
         max_hops = command_data.get("max_hops", 30)
         timeout = command_data.get("timeout", 2)
         project_id = command_data.get("project_id")
+        host_id = command_data.get("host_id")
+        job_id = command_data.get("job_id")
         
         # Build traceroute command
         cmd = ["traceroute", "-n", "-m", str(max_hops), "-w", str(timeout), target]
         
-        self.log(f"Running traceroute: {' '.join(cmd)}")
+        self.log(f"Running live traceroute: {' '.join(cmd)}")
         
         try:
             process = await asyncio.create_subprocess_exec(
@@ -1686,51 +1728,78 @@ class MicroHackAgent:
                 stderr=asyncio.subprocess.PIPE
             )
             
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=120  # 2 minute timeout for traceroute
-            )
-            
-            output = stdout.decode("utf-8", errors="replace")
-            
-            # Parse traceroute output
             hops = []
-            for line in output.strip().split("\n"):
-                # Skip header line
-                if line.startswith('traceroute') or 'hops max' in line.lower():
-                    continue
-                
-                # Parse hop line: "1  192.168.1.1  1.234 ms  1.456 ms  1.789 ms"
-                parts = line.split()
-                if len(parts) >= 2:
-                    try:
-                        hop_num = int(parts[0])
-                        ip = parts[1] if parts[1] != '*' else None
-                        
-                        # Get RTT values
-                        rtts = []
-                        for i, part in enumerate(parts[2:]):
-                            if part != '*' and part != 'ms':
-                                try:
-                                    rtts.append(float(part))
-                                except ValueError:
-                                    pass
-                        
-                        hops.append({
-                            "hop": hop_num,
-                            "ip": ip,
-                            "rtts": rtts,
-                            "avg_rtt": sum(rtts) / len(rtts) if rtts else None
-                        })
-                    except (ValueError, IndexError):
+            raw_output = ""
+            
+            # Read stdout line by line for live streaming
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        process.stdout.readline(),
+                        timeout=30  # 30 second timeout per line
+                    )
+                    if not line:
+                        break
+                    
+                    line_text = line.decode("utf-8", errors="replace").strip()
+                    raw_output += line_text + "\n"
+                    
+                    # Skip header line
+                    if line_text.startswith('traceroute') or 'hops max' in line_text.lower():
                         continue
+                    
+                    # Parse hop line: "1  192.168.1.1  1.234 ms  1.456 ms  1.789 ms"
+                    parts = line_text.split()
+                    if len(parts) >= 2:
+                        try:
+                            hop_num = int(parts[0])
+                            ip = parts[1] if parts[1] != '*' else None
+                            
+                            # Get RTT values
+                            rtts = []
+                            for part in parts[2:]:
+                                if part != '*' and part != 'ms':
+                                    try:
+                                        rtts.append(float(part))
+                                    except ValueError:
+                                        pass
+                            
+                            hop_data = {
+                                "hop": hop_num,
+                                "ip": ip,
+                                "rtts": rtts,
+                                "rtt_ms": round(sum(rtts) / len(rtts), 2) if rtts else None
+                            }
+                            hops.append(hop_data)
+                            
+                            # Send live hop update via WebSocket
+                            await self.send_traceroute_hop(
+                                command_id=command_id,
+                                host_id=host_id,
+                                job_id=job_id,
+                                target=target,
+                                hop=hop_data
+                            )
+                            
+                            self.log(f"Hop {hop_num}: {ip or '* * *'} - {hop_data.get('rtt_ms', '-')}ms")
+                            
+                        except (ValueError, IndexError):
+                            continue
+                            
+                except asyncio.TimeoutError:
+                    self.log(f"Timeout waiting for hop, continuing...", "WARNING")
+                    continue
+            
+            # Wait for process to complete
+            await asyncio.wait_for(process.wait(), timeout=10)
             
             response["data"] = {
                 "target": target,
                 "hops": hops,
                 "hop_count": len(hops),
-                "raw_output": output,
+                "raw_output": raw_output,
                 "project_id": project_id,
+                "host_id": host_id,
                 "scanned_at": datetime.utcnow().isoformat(),
                 "agent_id": self.agent_id,
                 "agent_hostname": self.hostname
