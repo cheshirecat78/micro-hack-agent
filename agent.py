@@ -4091,6 +4091,8 @@ apt-get install -y speedtest
             "dirb": "dirb",
             "nikto": "nikto",
             "ssh-audit": "ssh_audit",
+            "banner_grab": "banner",
+            "banner-grab": "banner",
             # Add more aliases as needed
         }
         # Map old/alias command to new short name and normalize the command
