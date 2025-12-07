@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.7.8"
+VERSION = "1.8.1"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -510,23 +510,28 @@ class MicroHackAgent:
         return False
     
     def _get_docker_host_ip(self) -> str:
-        """Get the Docker host's IP address from inside a container"""
-        # Try multiple methods to get the host IP
+        """Get the Docker host's actual LAN IP address from inside a container"""
+        # Try multiple methods to get the host's real LAN IP
         
-        # Method 1: Check HOST_IP environment variable (can be passed when running container)
+        # Method 1: Check HOST_IP environment variable (most reliable - user-provided)
         host_ip = os.environ.get('HOST_IP') or os.environ.get('DOCKER_HOST_IP')
         if host_ip:
             return host_ip
         
-        # Method 2: Use host.docker.internal (works on Docker Desktop for Mac/Windows)
+        # Method 2: Query host's default route IP via HTTP to self (when on host network)
+        # Skip if we don't have host network access
+        
+        # Method 3: Use host.docker.internal (works on Docker Desktop for Mac/Windows)
         try:
             host_ip = socket.gethostbyname('host.docker.internal')
-            if host_ip and not host_ip.startswith('127.'):
+            if host_ip and not host_ip.startswith('127.') and not host_ip.startswith('172.17.'):
                 return host_ip
         except:
             pass
         
-        # Method 3: Get default gateway (usually the host on Linux Docker)
+        # Method 4: Get default gateway (usually the host on Linux Docker)
+        # This gives us the docker bridge IP, not the host's LAN IP
+        gateway_ip = None
         try:
             with open('/proc/net/route', 'r') as f:
                 for line in f:
@@ -537,10 +542,19 @@ class MicroHackAgent:
                         # Convert from hex to IP
                         gateway_bytes = bytes.fromhex(gateway_hex)
                         gateway_ip = '.'.join(str(b) for b in reversed(gateway_bytes))
-                        if gateway_ip and not gateway_ip.startswith('127.'):
-                            return gateway_ip
+                        break
         except:
             pass
+        
+        # If gateway is a docker bridge (172.17.0.1), try to get actual host LAN
+        if gateway_ip and gateway_ip.startswith('172.17.'):
+            # Method 5: Try to infer from WAN lookup - if we can reach the internet,
+            # the route likely goes through the host's actual interface
+            # We return the gateway as fallback - frontend will show this as docker-host
+            return gateway_ip
+        
+        if gateway_ip and not gateway_ip.startswith('127.'):
+            return gateway_ip
         
         return None
     
@@ -579,8 +593,14 @@ class MicroHackAgent:
                 iface_lower = iface_name.lower()
                 iface_type = 'lan'  # default
                 
+                # Check if this is a Docker-internal IP (172.17.x.x is the default docker0 bridge)
+                is_docker_ip = ipv4.startswith('172.17.') or ipv4.startswith('172.18.') or ipv4.startswith('172.19.')
+                
+                # If we're in Docker and this looks like a docker bridge IP, mark as docker
+                if self._is_running_in_docker() and is_docker_ip:
+                    iface_type = 'docker'
                 # Docker interfaces (check first - most specific)
-                if 'docker' in iface_lower or iface_lower.startswith('veth'):
+                elif 'docker' in iface_lower or iface_lower.startswith('veth'):
                     iface_type = 'docker'
                 # Bridge interfaces used by Docker (br-xxxxx)
                 elif iface_lower.startswith('br-'):
@@ -737,6 +757,8 @@ class MicroHackAgent:
                 "location": self.location,
                 "version": VERSION,
                 "os": self.os_info,
+                "python_version": platform.python_version(),
+                "is_docker": self._is_running_in_docker(),
                 "network_interfaces": self.network_interfaces,
                 "capabilities": ["ping", "info", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "install_tool", "check_tools", "update_agent"]
             }
