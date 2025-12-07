@@ -762,7 +762,10 @@ class MicroHackAgent:
                 "python_version": platform.python_version(),
                 "is_docker": self._is_running_in_docker(),
                 "network_interfaces": self.network_interfaces,
-                "capabilities": ["ping", "info", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "install_tool", "check_tools", "update_agent"]
+                # All nmap_* commands are covered by 'nmap' capability
+                "capabilities": [
+                    "ping", "info", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "install_tool", "check_tools", "update_agent"
+                ]
             }
         }
         
