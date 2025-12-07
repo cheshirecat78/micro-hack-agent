@@ -3797,8 +3797,7 @@ apt-get install -y speedtest
                     
             except asyncio.TimeoutError:
                 response["success"] = False
-                response["error"] = "Installation timed out (5 minute limit)"
-                self.log(f"Install timed out", "ERROR")
+                response["error"] = "Timeout while installing {tool_name}"
             except Exception as e:
                 response["success"] = False
                 response["error"] = str(e)
@@ -4035,6 +4034,12 @@ apt-get install -y speedtest
                 self.log(f"Starting nmap scan for command_id: {command_id}")
                 response = await self.run_nmap_scan(command_id, command_data)
                 self.log(f"Nmap scan complete, success: {response.get('success')}")
+            
+            elif command == "nmap_network":
+                # Alias for nmap scan
+                self.log(f"Starting nmap_network scan for command_id: {command_id}")
+                response = await self.run_nmap_scan(command_id, command_data)
+                self.log(f"nmap_network scan complete, success: {response.get('success')}")
             
             elif command == "nikto":
                 # Run nikto web vulnerability scan
