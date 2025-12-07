@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.7.4"
+VERSION = "1.7.5"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -427,6 +427,7 @@ class MicroHackAgent:
         self.running = False
         self.connected = False
         self.reconnect_delay = RECONNECT_DELAY
+        self.key_invalidated = False  # Set when key is deleted/revoked - stops reconnection
         
         # Command queue for concurrent processing
         self._command_queue: asyncio.Queue = None  # Created in run()
@@ -638,10 +639,18 @@ class MicroHackAgent:
         except InvalidStatusCode as e:
             if e.status_code == 4001:
                 self.log("Connection rejected: Missing API key", "ERROR")
+                self.log("Set MICROHACK_API_KEY environment variable and restart", "ERROR")
+                self.key_invalidated = True  # No point retrying without a key
             elif e.status_code == 4002:
-                self.log("Connection rejected: Invalid API key", "ERROR")
+                self.log("Connection rejected: Invalid or deleted API key", "ERROR")
+                self.log("This API key no longer exists. Agent will stop reconnecting.", "ERROR")
+                self.log("Generate a new API key and update MICROHACK_API_KEY to reconnect.", "ERROR")
+                self.key_invalidated = True  # Key was deleted, stop retrying
             elif e.status_code == 4003:
                 self.log("Connection rejected: API key is disabled", "ERROR")
+                self.log("Re-enable the API key in the web UI to allow reconnection.", "WARNING")
+                # Don't set key_invalidated - key still exists, just disabled
+                # Agent will keep trying with exponential backoff
             else:
                 self.log(f"Connection rejected: HTTP {e.status_code}", "ERROR")
             return False
@@ -3981,7 +3990,13 @@ apt-get install -y speedtest
             async for message in self.ws:
                 await self.handle_message(message)
         except ConnectionClosed as e:
-            self.log(f"Connection closed: {e}", "WARNING")
+            self.log(f"Connection closed: code={e.code} reason={e.reason}", "WARNING")
+            # Check if key was invalidated while connected
+            if e.code == 4002:
+                self.log("API key was deleted or invalidated. Agent will stop reconnecting.", "ERROR")
+                self.key_invalidated = True
+            elif e.code == 4003:
+                self.log("API key was disabled. Agent will retry with backoff.", "WARNING")
         except Exception as e:
             self.log(f"Message loop error: {e}", "ERROR")
         finally:
@@ -4064,6 +4079,13 @@ apt-get install -y speedtest
                     self.ws = None
                 
                 self.connected = False
+            
+            # Check if key was invalidated - stop reconnecting
+            if self.key_invalidated:
+                self.log("API key is invalid or deleted. Agent stopping.", "ERROR")
+                self.log("To reconnect: generate a new API key, update MICROHACK_API_KEY, and restart the agent.", "ERROR")
+                self.running = False
+                break
             
             # Reconnect with backoff
             if self.running:
