@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.7.5"
+VERSION = "1.7.6"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -3692,9 +3692,18 @@ apt-get install -y speedtest
                 "status": "updated",
                 "old_version": VERSION,
                 "new_version": new_version,
-                "message": f"Agent updated from {VERSION} to {new_version}. Restart agent to apply changes.",
+                "message": f"Agent updated from {VERSION} to {new_version}. Restarting...",
                 "backup_path": backup_path
             }
+            
+            # Send response before restarting
+            if self.ws:
+                await self.ws.send(json.dumps(response))
+            
+            # Auto-restart after successful update
+            await asyncio.sleep(0.5)
+            self.log(f"Updated to v{new_version}, restarting...")
+            os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
             
         except urllib.error.URLError as e:
             response["success"] = False
