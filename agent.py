@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.3"
+VERSION = "1.10.4"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -84,10 +84,24 @@ except Exception:
     pass
 
 # Agent update URL (raw Python file)
-AGENT_UPDATE_URL = os.environ.get(
-    "MICROHACK_AGENT_UPDATE_URL", 
-    "https://raw.githubusercontent.com/cheshirecat78/micro-hack-agent/main/agent.py"
-)
+# Priority: 1) MICROHACK_AGENT_UPDATE_URL env, 2) derived from server URL, 3) hardcoded fallback
+def _get_agent_update_url():
+    """Determine the agent update URL"""
+    # Explicit update URL takes priority
+    if os.environ.get("MICROHACK_AGENT_UPDATE_URL"):
+        return os.environ.get("MICROHACK_AGENT_UPDATE_URL")
+    
+    # Derive from server URL if available
+    server_url = os.environ.get("MICROHACK_SERVER_URL", "")
+    if server_url:
+        # Remove trailing slash and append agent path
+        base = server_url.rstrip('/')
+        return f"{base}/agent/agent.py"
+    
+    # Fallback to GitHub (may not have latest)
+    return "https://raw.githubusercontent.com/cheshirecat78/micro-hack/main/agent/agent.py"
+
+AGENT_UPDATE_URL = _get_agent_update_url()
 
 # Skip auto-update flag (for development)
 SKIP_AUTO_UPDATE = os.environ.get("MICROHACK_SKIP_UPDATE", "").lower() in ("1", "true", "yes")
@@ -108,6 +122,7 @@ def auto_update_on_startup():
         return
     
     print(f"[UPDATE] Checking for updates (current: v{VERSION})...", flush=True)
+    print(f"[UPDATE] Update URL: {AGENT_UPDATE_URL}", flush=True)
     
     try:
         import urllib.request
