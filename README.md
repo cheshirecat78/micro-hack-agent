@@ -10,21 +10,25 @@ The micro-hack agent allows you to deploy lightweight agents across your infrast
 
 ### 1. Create an Agent API Key
 
-In micro-hack, create an agent API key:
+In micro-hack, go to **Settings → Agents** and create a new agent API key.
+
+Save the API key - it's only shown once!
+
+### 2. Deploy the Agent (One-Liner)
 
 ```bash
-# Using the API
-curl -X POST "https://app.micro-hack.nl/api/agents/keys" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "my-server-agent", "permissions": ["ping", "info", "echo"]}'
+curl -sL https://raw.githubusercontent.com/cheshirecat78/micro-hack/main/agent/deploy.sh | bash -s -- --key YOUR_API_KEY
 ```
 
-Save the API key from the response - it's only shown once!
+That's it! The script will:
+- ✅ Detect if Docker is available
+- ✅ If Docker: Deploy in a fully-capable container with network scanning permissions
+- ✅ If no Docker: Create isolated Python environment and run natively
+- ✅ Set up auto-restart on system boot
 
-### 2. Deploy the Agent
+### Alternative: Manual Docker Deployment
 
-Create a `docker-compose.yml` file:
+If you prefer manual control:
 
 ```yaml
 version: '3.8'
@@ -34,12 +38,12 @@ services:
     image: cheshirecat78/micro-hack-agent:latest
     container_name: micro-hack-agent
     restart: unless-stopped
+    privileged: true
+    network_mode: host
     environment:
       - MICROHACK_SERVER_URL=wss://app.micro-hack.nl
       - MICROHACK_API_KEY=mh_agent_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
-
-Start the agent:
 
 ```bash
 docker-compose up -d
@@ -50,7 +54,13 @@ docker-compose up -d
 Check the agent logs:
 
 ```bash
-docker-compose logs -f
+# Docker deployment
+docker logs -f micro-hack-agent
+
+# Native deployment
+~/.μhack-agent/logs/agent.log
+# or
+journalctl -u micro-hack-agent -f
 ```
 
 You should see:
@@ -61,23 +71,34 @@ You should see:
 [2024-01-01 12:00:00] [INFO] Registered as hostname (Linux 5.15.0)
 ```
 
-### 4. Test with Ping
+## Deploy Script Options
 
-Send a ping command to the agent:
+The `deploy.sh` script provides full lifecycle management:
 
 ```bash
-curl -X POST "https://app.micro-hack.nl/api/agents/keys/{key_id}/ping" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-```
+# Deploy with Docker (auto-detected)
+./deploy.sh --key mh_agent_xxxxxxxxxxxx
 
-Response:
-```json
-{
-  "success": true,
-  "message": "pong",
-  "agent": "hostname",
-  "latency_check": "passed"
-}
+# Force native Python deployment (no Docker)
+./deploy.sh --key mh_agent_xxxxxxxxxxxx --native
+
+# Use custom server
+./deploy.sh --key mh_agent_xxxxxxxxxxxx --server wss://my-server.com
+
+# Check agent status
+./deploy.sh --status
+
+# View logs
+./deploy.sh --logs
+
+# Update to latest version
+./deploy.sh --update
+
+# Stop the agent
+./deploy.sh --stop
+
+# Completely uninstall
+./deploy.sh --uninstall
 ```
 
 ## API Endpoints
