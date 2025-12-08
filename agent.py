@@ -786,6 +786,7 @@ class MicroHackAgent:
                 "os": self.os_info,
                 "python_version": platform.python_version(),
                 "is_docker": self._is_running_in_docker(),
+                "is_root": self._is_root(),
                 "network_interfaces": self.network_interfaces,
                 # All nmap_* commands are covered by 'nmap' capability
                 "capabilities": [
