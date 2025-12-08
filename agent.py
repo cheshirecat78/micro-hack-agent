@@ -776,12 +776,17 @@ class MicroHackAgent:
                 "network_interfaces": self.network_interfaces,
                 # All nmap_* commands are covered by 'nmap' capability
                 "capabilities": [
-                    "ping", "info", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "install_tool", "check_tools", "update_agent"
-                ]
+                    "ping", "info", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "install_tool", "check_tools", "update_agent",
+                    # PTY/shell interactive commands
+                    "shell_start", "shell_input", "shell_stop", "shell_resize"
+                ],
+                # Whether this agent supports a PTY (shown in UI for enabling interactive sessions)
+                "shell_pty_available": shutil.which("tmux") is not None
             }
         }
         
         await self.ws.send(json.dumps(registration))
+        self.log(f"Registration payload capabilities: {registration['data'].get('capabilities')}", "DEBUG")
         loc_str = f" @ {self.location.get('city')}, {self.location.get('country')}" if self.location else ""
         self.log(f"Registered as {self.hostname} ({self.os_info}){loc_str}")
     
