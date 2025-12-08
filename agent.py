@@ -393,6 +393,14 @@ TOOL_INSTALL_COMMANDS = {
         "size": "10 MB",
         "pre_install": ["apt-get", "install", "-y", "python3-pip"]
     },
+    "shell_pty": {
+        "check": "tmux",
+        "install": ["apt-get", "install", "-y", "tmux"],
+        "uninstall": ["apt-get", "remove", "-y", "tmux"],
+        "description": "Full PTY shell session support (tmux)",
+        "size": "0.2 MB",
+        "pre_install": None
+    },
     "chromium": {
         "check": "chromium",
         "install": ["apt-get", "install", "-y", "chromium"],
@@ -438,6 +446,8 @@ class MicroHackAgent:
         self._installing_tool: str = None  # Currently installing tool name
         
         # Gather system info
+        # Shell sessions map: session_id -> { "master_fd": int, "process": subprocess.Popen }
+        self.shell_sessions = {}
         self.hostname = socket.gethostname()
         self.os_info = f"{platform.system()} {platform.release()}"
         
@@ -4319,7 +4329,8 @@ apt-get install -y speedtest
                     "traceroute_available": shutil.which("traceroute") is not None,
                     "dig_available": shutil.which("dig") is not None,
                     "speedtest_available": shutil.which("speedtest-cli") is not None or shutil.which("speedtest") is not None,
-                    "version": VERSION
+                    "version": VERSION,
+                    "shell_pty_available": shutil.which("tmux") is not None
                 }
             
             elif command == "check_tools":
