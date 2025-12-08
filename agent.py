@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.8.5"
+VERSION = "1.8.6"
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -950,13 +950,30 @@ class MicroHackAgent:
 
         try:
             master_fd, slave_fd = _os.openpty()
+            # Prepare a preexec function that sets session id and assigns the
+            # controlling terminal (TIOCSCTTY) for job control in the child.
+            def _preexec():
+                try:
+                    if hasattr(os, 'setsid'):
+                        os.setsid()
+                except Exception:
+                    pass
+                try:
+                    # set controlling terminal on *nix systems
+                    import fcntl as _fcntl
+                    import termios as _termios
+                    _fcntl.ioctl(slave_fd, _termios.TIOCSCTTY, 0)
+                except Exception:
+                    # Best effort; ignore failures (Windows, or permissions)
+                    pass
+
             proc = subprocess.Popen(
                 args,
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
                 close_fds=True,
-                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
+                preexec_fn=_preexec if hasattr(os, 'setsid') else None
             )
             # Save session
             self.shell_sessions[session_id] = {
@@ -1041,6 +1058,7 @@ class MicroHackAgent:
                 data = bytes(input_str)
             # Ensure newline at end if not present? Keep as is - caller handles
             _os.write(master_fd, data)
+            self.log(f'Wrote to shell session {session_id}: {input_str!r}', 'DEBUG')
             return True, ""
         except Exception as e:
             return False, str(e)
