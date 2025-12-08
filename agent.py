@@ -1123,7 +1123,8 @@ class MicroHackAgent:
         
         scan_type = command_data.get("scan_type", "quick")
         ports = command_data.get("ports")
-        extra_args = command_data.get("arguments", "")
+        # Support both 'arguments' and legacy 'options' keys from dispatcher
+        extra_args = command_data.get("arguments", "") or command_data.get("options", "")
         project_id = command_data.get("project_id")  # For associating results
         
         # Build nmap command
@@ -4308,7 +4309,7 @@ apt-get install -y speedtest
             elif command == "capabilities":
                 # Return what this agent can do
                 response["data"] = {
-                    "commands": ["ping", "host_ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "dns_server", "dig", "ip_reputation", "domain_reputation", "speedtest", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent", "restart"],
+                    "commands": ["ping", "host_ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "dns_server", "dig", "ip_reputation", "domain_reputation", "speedtest", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent", "restart", "run_command"],
                     "nmap_available": shutil.which("nmap") is not None,
                     "nikto_available": shutil.which("nikto") is not None,
                     "dirb_available": shutil.which("dirb") is not None,
@@ -4356,6 +4357,35 @@ apt-get install -y speedtest
                 self.log("Restarting agent...")
                 current_script = os.path.abspath(__file__)
                 os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
+            elif command == "run_command":
+                # Run a single shell command and return stdout/stderr and code
+                cmd = command_data.get('cmd') or command_data.get('command') or ''
+                timeout = command_data.get('timeout', 30)
+                if not cmd:
+                    response["success"] = False
+                    response["error"] = "No command provided"
+                else:
+                    import shlex
+                    try:
+                        args = shlex.split(cmd)
+                        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+                        response["data"] = {
+                            "stdout": proc.stdout,
+                            "stderr": proc.stderr,
+                            "returncode": proc.returncode
+                        }
+                        response["success"] = proc.returncode == 0
+                        if proc.returncode != 0:
+                            response["error"] = proc.stderr or f"Command failed with code {proc.returncode}"
+                    except subprocess.TimeoutExpired:
+                        response["success"] = False
+                        response["error"] = f"Command timed out after {timeout}s"
+                    except FileNotFoundError as e:
+                        response["success"] = False
+                        response["error"] = str(e)
+                    except Exception as e:
+                        response["success"] = False
+                        response["error"] = str(e)
             
             else:
                 response["success"] = False
