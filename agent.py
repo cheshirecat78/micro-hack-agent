@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.2"
+VERSION = "1.10.3"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -928,6 +928,9 @@ class MicroHackAgent:
         self._webserver_enabled = False
         self._webserver_port = 8888
         self._webserver_token = None
+        
+        # Collected host info (from self-scan)
+        self.host_info = {}
     
     def _get_local_ip(self) -> str:
         """Get local IP address"""
@@ -939,6 +942,409 @@ class MicroHackAgent:
             return ip
         except:
             return "unknown"
+    
+    def collect_host_info(self) -> dict:
+        """
+        Collect comprehensive host information for the overview panel.
+        This runs on startup to provide detailed system info.
+        """
+        info = {
+            "collected_at": datetime.utcnow().isoformat(),
+            "os": {},
+            "hardware": {},
+            "network": {},
+            "software": {},
+            "security": {},
+            "users": []
+        }
+        
+        # === OS Information ===
+        try:
+            info["os"] = {
+                "system": platform.system(),
+                "release": platform.release(),
+                "version": platform.version(),
+                "machine": platform.machine(),
+                "processor": platform.processor(),
+                "architecture": platform.architecture()[0],
+                "hostname": socket.gethostname(),
+                "fqdn": socket.getfqdn(),
+            }
+            
+            # Linux-specific: get distro info
+            if platform.system() == "Linux":
+                try:
+                    # Try /etc/os-release first (modern Linux)
+                    if os.path.exists("/etc/os-release"):
+                        with open("/etc/os-release") as f:
+                            for line in f:
+                                if line.startswith("NAME="):
+                                    info["os"]["distro_name"] = line.split("=")[1].strip().strip('"')
+                                elif line.startswith("VERSION="):
+                                    info["os"]["distro_version"] = line.split("=")[1].strip().strip('"')
+                                elif line.startswith("ID="):
+                                    info["os"]["distro_id"] = line.split("=")[1].strip().strip('"')
+                                elif line.startswith("PRETTY_NAME="):
+                                    info["os"]["distro_pretty"] = line.split("=", 1)[1].strip().strip('"')
+                except Exception:
+                    pass
+                
+                # Get kernel version
+                try:
+                    result = subprocess.run(["uname", "-r"], capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        info["os"]["kernel"] = result.stdout.strip()
+                except Exception:
+                    pass
+            
+            # Windows-specific
+            elif platform.system() == "Windows":
+                try:
+                    info["os"]["win_edition"] = platform.win32_edition() if hasattr(platform, 'win32_edition') else None
+                    info["os"]["win_version"] = platform.win32_ver()
+                except Exception:
+                    pass
+        except Exception as e:
+            self.log(f"Error collecting OS info: {e}", "DEBUG")
+        
+        # === Hardware Information ===
+        try:
+            if PSUTIL_AVAILABLE:
+                # CPU
+                info["hardware"]["cpu_count_physical"] = psutil.cpu_count(logical=False)
+                info["hardware"]["cpu_count_logical"] = psutil.cpu_count(logical=True)
+                try:
+                    info["hardware"]["cpu_freq_mhz"] = round(psutil.cpu_freq().current, 0) if psutil.cpu_freq() else None
+                except Exception:
+                    pass
+                
+                # Memory
+                mem = psutil.virtual_memory()
+                info["hardware"]["ram_total_gb"] = round(mem.total / (1024 ** 3), 2)
+                info["hardware"]["ram_available_gb"] = round(mem.available / (1024 ** 3), 2)
+                
+                # Swap
+                swap = psutil.swap_memory()
+                info["hardware"]["swap_total_gb"] = round(swap.total / (1024 ** 3), 2)
+                
+                # Disks
+                disks = []
+                for partition in psutil.disk_partitions(all=False):
+                    try:
+                        usage = psutil.disk_usage(partition.mountpoint)
+                        disks.append({
+                            "device": partition.device,
+                            "mountpoint": partition.mountpoint,
+                            "fstype": partition.fstype,
+                            "total_gb": round(usage.total / (1024 ** 3), 2),
+                            "used_gb": round(usage.used / (1024 ** 3), 2),
+                            "free_gb": round(usage.free / (1024 ** 3), 2),
+                            "percent": usage.percent
+                        })
+                    except (PermissionError, OSError):
+                        pass
+                info["hardware"]["disks"] = disks
+                
+                # Boot time
+                info["hardware"]["boot_time"] = datetime.fromtimestamp(psutil.boot_time()).isoformat()
+                info["hardware"]["uptime_seconds"] = int(datetime.now().timestamp() - psutil.boot_time())
+        except Exception as e:
+            self.log(f"Error collecting hardware info: {e}", "DEBUG")
+        
+        # === Network Information ===
+        try:
+            interfaces = []
+            
+            if PSUTIL_AVAILABLE:
+                # Get all network interfaces with addresses
+                addrs = psutil.net_if_addrs()
+                stats = psutil.net_if_stats()
+                
+                for iface_name, iface_addrs in addrs.items():
+                    iface_info = {
+                        "name": iface_name,
+                        "ipv4": None,
+                        "ipv6": None,
+                        "mac": None,
+                        "mac_vendor": None,
+                        "is_up": False,
+                        "speed_mbps": None,
+                        "mtu": None
+                    }
+                    
+                    for addr in iface_addrs:
+                        if addr.family == socket.AF_INET:
+                            iface_info["ipv4"] = addr.address
+                            iface_info["netmask"] = addr.netmask
+                        elif addr.family == socket.AF_INET6:
+                            if not addr.address.startswith("fe80"):  # Skip link-local
+                                iface_info["ipv6"] = addr.address
+                        elif hasattr(socket, 'AF_PACKET') and addr.family == socket.AF_PACKET:
+                            iface_info["mac"] = addr.address
+                        elif hasattr(psutil, '_common') and addr.family == psutil.AF_LINK:
+                            iface_info["mac"] = addr.address
+                    
+                    # Get interface stats
+                    if iface_name in stats:
+                        stat = stats[iface_name]
+                        iface_info["is_up"] = stat.isup
+                        iface_info["speed_mbps"] = stat.speed if stat.speed > 0 else None
+                        iface_info["mtu"] = stat.mtu
+                    
+                    # Look up MAC vendor (first 3 octets = OUI)
+                    if iface_info["mac"] and iface_info["mac"] != "00:00:00:00:00:00":
+                        mac_vendor = self._lookup_mac_vendor(iface_info["mac"])
+                        if mac_vendor:
+                            iface_info["mac_vendor"] = mac_vendor
+                    
+                    # Classify interface type
+                    name_lower = iface_name.lower()
+                    if "docker" in name_lower or "br-" in name_lower or "veth" in name_lower:
+                        iface_info["type"] = "docker"
+                    elif "wlan" in name_lower or "wifi" in name_lower or "wl" in name_lower:
+                        iface_info["type"] = "wifi"
+                    elif "wg" in name_lower or "tun" in name_lower or "tap" in name_lower:
+                        iface_info["type"] = "vpn"
+                    elif "lo" == name_lower or "loopback" in name_lower:
+                        iface_info["type"] = "loopback"
+                    elif "eth" in name_lower or "en" in name_lower or "ens" in name_lower:
+                        iface_info["type"] = "ethernet"
+                    else:
+                        iface_info["type"] = "other"
+                    
+                    interfaces.append(iface_info)
+            
+            info["network"]["interfaces"] = interfaces
+            info["network"]["default_gateway"] = self._get_default_gateway()
+            info["network"]["dns_servers"] = self._get_dns_servers()
+            
+        except Exception as e:
+            self.log(f"Error collecting network info: {e}", "DEBUG")
+        
+        # === Software Information ===
+        try:
+            # Check for common security tools
+            tools = {}
+            tool_list = ["nmap", "nikto", "dirb", "gobuster", "sslscan", "whatweb", "ssh-audit", 
+                        "masscan", "hydra", "john", "hashcat", "sqlmap", "wpscan", "nuclei",
+                        "ffuf", "feroxbuster", "amass", "subfinder", "httpx", "curl", "wget"]
+            for tool in tool_list:
+                tools[tool] = shutil.which(tool) is not None
+            info["software"]["security_tools"] = tools
+            
+            # Check for package managers
+            pkg_managers = {}
+            for pm in ["apt", "apt-get", "yum", "dnf", "pacman", "brew", "choco", "pip", "pip3"]:
+                pkg_managers[pm] = shutil.which(pm) is not None
+            info["software"]["package_managers"] = pkg_managers
+            
+            # Check Python packages
+            try:
+                import pkg_resources
+                installed_packages = [{"name": p.key, "version": p.version} for p in pkg_resources.working_set]
+                info["software"]["python_packages"] = installed_packages[:50]  # Limit to 50
+            except Exception:
+                pass
+            
+            # Count running processes
+            if PSUTIL_AVAILABLE:
+                try:
+                    info["software"]["process_count"] = len(psutil.pids())
+                except Exception:
+                    pass
+                
+        except Exception as e:
+            self.log(f"Error collecting software info: {e}", "DEBUG")
+        
+        # === Security Information ===
+        try:
+            # Check listening ports
+            listening_ports = []
+            if PSUTIL_AVAILABLE:
+                try:
+                    for conn in psutil.net_connections(kind='inet'):
+                        if conn.status == 'LISTEN':
+                            listening_ports.append({
+                                "port": conn.laddr.port,
+                                "ip": conn.laddr.ip,
+                                "pid": conn.pid
+                            })
+                except (psutil.AccessDenied, PermissionError):
+                    pass
+            info["security"]["listening_ports"] = listening_ports[:50]  # Limit
+            
+            # Check firewall status (Linux)
+            if platform.system() == "Linux":
+                # Check iptables
+                try:
+                    result = subprocess.run(["iptables", "-L", "-n"], capture_output=True, text=True, timeout=5)
+                    info["security"]["iptables_rules"] = len(result.stdout.split('\n')) if result.returncode == 0 else 0
+                except Exception:
+                    pass
+                
+                # Check ufw
+                try:
+                    result = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        info["security"]["ufw_status"] = "active" if "active" in result.stdout.lower() else "inactive"
+                except Exception:
+                    pass
+            
+            # Check SELinux (if on Linux)
+            if platform.system() == "Linux":
+                try:
+                    if os.path.exists("/etc/selinux/config"):
+                        result = subprocess.run(["getenforce"], capture_output=True, text=True, timeout=5)
+                        if result.returncode == 0:
+                            info["security"]["selinux"] = result.stdout.strip()
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            self.log(f"Error collecting security info: {e}", "DEBUG")
+        
+        # === Users Information ===
+        try:
+            if PSUTIL_AVAILABLE:
+                # Current logged-in users
+                logged_in = []
+                for user in psutil.users():
+                    logged_in.append({
+                        "name": user.name,
+                        "terminal": user.terminal,
+                        "host": user.host,
+                        "started": datetime.fromtimestamp(user.started).isoformat()
+                    })
+                info["users"] = logged_in
+            
+            # Current user
+            try:
+                import getpass
+                info["security"]["current_user"] = getpass.getuser()
+            except Exception:
+                pass
+                
+        except Exception as e:
+            self.log(f"Error collecting user info: {e}", "DEBUG")
+        
+        self.host_info = info
+        return info
+    
+    def _lookup_mac_vendor(self, mac: str) -> Optional[str]:
+        """Look up MAC address vendor from OUI prefix"""
+        # Common OUI prefixes (first 3 octets) -> Vendor name
+        # This is a small subset; a full lookup would use an OUI database
+        OUI_DATABASE = {
+            "00:0c:29": "VMware",
+            "00:50:56": "VMware",
+            "00:1c:42": "Parallels",
+            "08:00:27": "VirtualBox",
+            "52:54:00": "QEMU/KVM",
+            "00:15:5d": "Hyper-V",
+            "02:42:": "Docker",
+            "00:1a:4a": "Qumranet/KVM",
+            "b8:27:eb": "Raspberry Pi",
+            "dc:a6:32": "Raspberry Pi",
+            "e4:5f:01": "Raspberry Pi",
+            "28:cd:c1": "Raspberry Pi",
+            "d8:3a:dd": "Raspberry Pi",
+            "00:00:5e": "IANA",
+            "00:1b:21": "Intel",
+            "00:1e:67": "Intel",
+            "00:1f:3c": "Intel",
+            "3c:97:0e": "Intel",
+            "a4:4c:c8": "Intel",
+            "f8:b1:56": "Dell",
+            "14:fe:b5": "Dell",
+            "00:14:22": "Dell",
+            "00:1e:c9": "Dell",
+            "d4:be:d9": "Dell",
+            "00:25:64": "Dell",
+            "18:66:da": "Dell",
+            "00:50:8b": "HP",
+            "00:1e:0b": "HP",
+            "3c:d9:2b": "HP",
+            "94:57:a5": "HP",
+            "08:00:20": "Sun/Oracle",
+            "00:03:ba": "Sun/Oracle",
+            "00:0d:3a": "Microsoft Azure",
+            "00:17:fa": "Microsoft Hyper-V",
+            "00:1d:d8": "Microsoft",
+            "28:18:78": "Microsoft",
+            "7c:1e:52": "Microsoft",
+            "00:16:3e": "Xen",
+            "00:25:90": "Supermicro",
+            "00:e0:81": "Tyan",
+            "ac:1f:6b": "Supermicro",
+        }
+        
+        if not mac:
+            return None
+            
+        mac_lower = mac.lower().replace("-", ":")
+        prefix = mac_lower[:8]  # First 3 octets (xx:xx:xx)
+        
+        # Direct match
+        if prefix in OUI_DATABASE:
+            return OUI_DATABASE[prefix]
+        
+        # Partial match (for Docker which uses 02:42:)
+        for oui, vendor in OUI_DATABASE.items():
+            if mac_lower.startswith(oui):
+                return vendor
+        
+        return None
+    
+    def _get_default_gateway(self) -> Optional[str]:
+        """Get default gateway IP"""
+        try:
+            if platform.system() == "Linux":
+                result = subprocess.run(["ip", "route", "show", "default"], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0 and "via" in result.stdout:
+                    parts = result.stdout.split()
+                    idx = parts.index("via")
+                    return parts[idx + 1]
+            elif platform.system() == "Darwin":  # macOS
+                result = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        if "gateway:" in line:
+                            return line.split(":")[1].strip()
+            elif platform.system() == "Windows":
+                result = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        if "Default Gateway" in line and ":" in line:
+                            gw = line.split(":")[-1].strip()
+                            if gw:
+                                return gw
+        except Exception:
+            pass
+        return None
+    
+    def _get_dns_servers(self) -> list:
+        """Get configured DNS servers"""
+        dns_servers = []
+        try:
+            if platform.system() == "Linux":
+                # Try /etc/resolv.conf
+                if os.path.exists("/etc/resolv.conf"):
+                    with open("/etc/resolv.conf") as f:
+                        for line in f:
+                            if line.strip().startswith("nameserver"):
+                                dns = line.split()[1]
+                                dns_servers.append(dns)
+            elif platform.system() == "Windows":
+                result = subprocess.run(["ipconfig", "/all"], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        if "DNS Servers" in line and ":" in line:
+                            dns = line.split(":")[-1].strip()
+                            if dns:
+                                dns_servers.append(dns)
+        except Exception:
+            pass
+        return dns_servers[:5]  # Limit to 5
     
     def _is_root(self) -> bool:
         """Check if running as root/administrator"""
@@ -1232,6 +1638,11 @@ class MicroHackAgent:
         if not self.ws:
             return
         
+        # Collect comprehensive host info on registration
+        self.log("Collecting host information...")
+        host_info = self.collect_host_info()
+        self.log(f"Host info collected: OS={host_info.get('os', {}).get('distro_pretty') or host_info.get('os', {}).get('system')}, RAM={host_info.get('hardware', {}).get('ram_total_gb')}GB")
+        
         registration = {
             "type": "register",
             "data": {
@@ -1246,6 +1657,7 @@ class MicroHackAgent:
                 "is_docker": self._is_running_in_docker(),
                 "is_root": self._is_root(),
                 "network_interfaces": self.network_interfaces,
+                "host_info": host_info,  # Comprehensive host scan data
                 # All nmap_* commands are covered by 'nmap' capability
                 "capabilities": [
                     "ping", "info", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "install_tool", "check_tools", "update_agent",
