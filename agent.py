@@ -117,6 +117,16 @@ def auto_update_on_startup():
         with urllib.request.urlopen(AGENT_UPDATE_URL, timeout=15) as resp:
             new_code = resp.read().decode('utf-8')
         
+        # Validate that we got actual Python code, not an error page
+        if not new_code.strip().startswith(('#', 'import', 'from', '"""', "'''")):
+            # Check for common error responses
+            if '404' in new_code.lower() or 'not found' in new_code.lower():
+                print(f"[UPDATE] Remote URL returned 404, skipping update", flush=True)
+                return
+            if '<html' in new_code.lower() or '<!doctype' in new_code.lower():
+                print(f"[UPDATE] Remote URL returned HTML instead of Python, skipping update", flush=True)
+                return
+        
         # Extract version from new code
         new_version = None
         for line in new_code.split('\n'):
@@ -451,6 +461,7 @@ class MicroHackAgent:
         
         # Command queue for concurrent processing
         self._command_queue: asyncio.Queue = None  # Created in run()
+        self._priority_queue: asyncio.Queue = None  # High-priority commands (info, ping, shell)
         self._num_workers = 4  # Number of concurrent command workers
         self._worker_tasks: list = []
         
@@ -458,9 +469,15 @@ class MicroHackAgent:
         self._install_lock: asyncio.Lock = None  # Created in run()
         self._installing_tool: str = None  # Currently installing tool name
         
-        # Spam prevention: 3-second cooldown between commands
-        self._last_command_time: float = 0.0
-        self._command_cooldown: float = 3.0  # seconds
+        # Spam prevention: 3-second cooldown between SCAN commands only
+        self._last_scan_time: float = 0.0
+        self._scan_cooldown: float = 3.0  # seconds
+        
+        # Commands exempt from cooldown (lightweight/interactive)
+        self._fast_commands = {
+            "ping", "info", "echo", "check_tools", "shell_start", "shell_stop",
+            "shell_input", "shell_resize", "terminal", "get_shell_data"
+        }
         
         # Gather system info
         # Shell sessions map: session_id -> { "master_fd": int, "process": subprocess.Popen }
@@ -1227,12 +1244,20 @@ class MicroHackAgent:
             pass  # Silent acknowledgment
         
         elif msg_type == "command":
-            # Queue command for worker processing (enables concurrency)
-            if self._command_queue:
-                await self._command_queue.put(data)
+            # Route to priority queue for fast commands, regular queue for scans
+            command = data.get("command", "")
+            if command in self._fast_commands:
+                # Fast commands go to priority queue for immediate handling
+                if self._priority_queue:
+                    await self._priority_queue.put(data)
+                else:
+                    await self.handle_command(data)
             else:
-                # Fallback to direct execution if queue not ready
-                await self.handle_command(data)
+                # Scan/heavy commands go to regular queue
+                if self._command_queue:
+                    await self._command_queue.put(data)
+                else:
+                    await self.handle_command(data)
         
         elif msg_type == "error":
             self.log(f"Server error: {data.get('message')}", "ERROR")
@@ -4327,6 +4352,17 @@ apt-get install -y speedtest
             with urllib.request.urlopen(AGENT_UPDATE_URL, timeout=30) as resp:
                 new_code = resp.read().decode('utf-8')
             
+            # Validate that we got actual Python code, not an error page
+            if not new_code.strip().startswith(('#', 'import', 'from', '"""', "'''")):
+                if '404' in new_code.lower() or 'not found' in new_code.lower():
+                    response["success"] = False
+                    response["error"] = "Update URL returned 404 - agent repository not found"
+                    return response
+                if '<html' in new_code.lower() or '<!doctype' in new_code.lower():
+                    response["success"] = False
+                    response["error"] = "Update URL returned HTML instead of Python code"
+                    return response
+            
             # Extract version from new code
             new_version = None
             for line in new_code.split('\n'):
@@ -4396,16 +4432,19 @@ apt-get install -y speedtest
         """Handle a command from the server"""
         import time
         
-        # Spam prevention: enforce 3-second cooldown between commands
-        current_time = time.time()
-        time_since_last_command = current_time - self._last_command_time
-        if time_since_last_command < self._command_cooldown:
-            wait_time = self._command_cooldown - time_since_last_command
-            self.log(f"Command received but cooldown active ({wait_time:.1f}s remaining), waiting...", "DEBUG")
-            await asyncio.sleep(wait_time)
+        command = data.get("command", "")
         
-        # Update last command time
-        self._last_command_time = time.time()
+        # Spam prevention: enforce 3-second cooldown only for SCAN commands
+        # Fast commands (ping, info, shell, terminal) skip cooldown
+        if command not in self._fast_commands:
+            current_time = time.time()
+            time_since_last_scan = current_time - self._last_scan_time
+            if time_since_last_scan < self._scan_cooldown:
+                wait_time = self._scan_cooldown - time_since_last_scan
+                self.log(f"Scan cooldown active ({wait_time:.1f}s remaining), waiting...", "DEBUG")
+                await asyncio.sleep(wait_time)
+            # Update last scan time
+            self._last_scan_time = time.time()
         
         # Handler stubs for new nmap command variants
         async def run_nmap_quick_scan(command_id, command_data):
@@ -4757,8 +4796,42 @@ apt-get install -y speedtest
             await self.ws.send(response_json)
             self.log(f"Response sent successfully")
     
+    async def _priority_worker(self, worker_id: int):
+        """Worker that processes high-priority commands (info, ping, shell) with no cooldown"""
+        self.log(f"Priority worker {worker_id} started")
+        
+        while self.running and self.connected:
+            try:
+                # Get command from priority queue with timeout
+                try:
+                    command_data = await asyncio.wait_for(
+                        self._priority_queue.get(),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                
+                # Process the command immediately (no cooldown for priority commands)
+                command = command_data.get("command", "unknown")
+                self.log(f"Priority worker {worker_id} executing: {command}", "DEBUG")
+                
+                try:
+                    await self.handle_command(command_data)
+                except Exception as e:
+                    self.log(f"Priority worker {worker_id} error: {e}", "ERROR")
+                
+                self._priority_queue.task_done()
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.log(f"Priority worker {worker_id} error: {e}", "ERROR")
+                await asyncio.sleep(0.1)
+        
+        self.log(f"Priority worker {worker_id} stopped")
+    
     async def _command_worker(self, worker_id: int):
-        """Worker that processes commands from the queue concurrently"""
+        """Worker that processes scan commands from the queue (with cooldown)"""
         self.log(f"Command worker {worker_id} started")
         
         while self.running and self.connected:
@@ -4827,8 +4900,9 @@ apt-get install -y speedtest
         """Main agent run loop with auto-reconnect"""
         self.running = True
         
-        # Create command queue
+        # Create command queues - priority queue for fast commands, regular for scans
         self._command_queue = asyncio.Queue()
+        self._priority_queue = asyncio.Queue()
         
         # Create installation lock
         self._install_lock = asyncio.Lock()
@@ -4838,7 +4912,7 @@ apt-get install -y speedtest
         self.log(f"Hostname: {self.hostname}")
         self.log(f"OS: {self.os_info}")
         self.log(f"Local IP: {self.local_ip}")
-        self.log(f"Command workers: {self._num_workers}")
+        self.log(f"Command workers: {self._num_workers} + 2 priority workers")
         
         if not self.api_key:
             self.log("ERROR: MICROHACK_API_KEY environment variable not set!", "ERROR")
@@ -4849,6 +4923,13 @@ apt-get install -y speedtest
             if await self.connect():
                 # Start command workers
                 self._worker_tasks = []
+                
+                # 2 priority workers for fast commands (info, ping, shell)
+                for i in range(2):
+                    task = asyncio.create_task(self._priority_worker(i))
+                    self._worker_tasks.append(task)
+                
+                # Regular workers for scan commands
                 for i in range(self._num_workers):
                     task = asyncio.create_task(self._command_worker(i))
                     self._worker_tasks.append(task)
