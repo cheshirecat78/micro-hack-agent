@@ -6,7 +6,8 @@ FROM python:3.11-slim
 
 LABEL maintainer="micro-hack team"
 LABEL description="micro-hack remote agent for distributed operations"
-LABEL version="1.8.6"
+ARG AGENT_VERSION=1.8.8
+LABEL version="${AGENT_VERSION}"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

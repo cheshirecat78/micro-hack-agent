@@ -68,7 +68,20 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.8.6"
+VERSION = "1.8.8"
+try:
+    # Look for an agent/VERSION file to override the baked-in version. This
+    # allows us to bump the version file and let the code always read the
+    # current value.
+    import os as _os
+    version_path = _os.path.join(_os.path.dirname(__file__), 'VERSION')
+    if _os.path.exists(version_path):
+        with open(version_path, 'r') as vf:
+            v = vf.read().strip()
+            if v:
+                VERSION = v
+except Exception:
+    pass
 
 # Agent update URL (raw Python file)
 AGENT_UPDATE_URL = os.environ.get(
@@ -949,38 +962,72 @@ class MicroHackAgent:
             args = [command]
 
         try:
-            master_fd, slave_fd = _os.openpty()
-            # Prepare a preexec function that sets session id and assigns the
-            # controlling terminal (TIOCSCTTY) for job control in the child.
-            def _preexec():
-                try:
-                    if hasattr(os, 'setsid'):
-                        os.setsid()
-                except Exception:
-                    pass
-                try:
-                    # set controlling terminal on *nix systems
-                    import fcntl as _fcntl
-                    import termios as _termios
-                    _fcntl.ioctl(slave_fd, _termios.TIOCSCTTY, 0)
-                except Exception:
-                    # Best effort; ignore failures (Windows, or permissions)
-                    pass
+            # Prefer pty.fork() on POSIX systems. This ensures the child has a
+            # proper controlling terminal so shells get job control. If pty.fork
+            # is unavailable (e.g., Windows), fall back to openpty + subprocess.
+            use_fork = False
+            try:
+                import pty as _pty
+                # Only attempt fork on POSIX platforms
+                if os.name == 'posix':
+                    use_fork = True
+            except Exception:
+                use_fork = False
 
-            proc = subprocess.Popen(
-                args,
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                close_fds=True,
-                preexec_fn=_preexec if hasattr(os, 'setsid') else None
-            )
-            # Save session
-            self.shell_sessions[session_id] = {
+            if use_fork:
+                self.log("Using pty.fork() for PTY spawn (POSIX)", "DEBUG")
+                # Fork a new process attached to a PTY master/slave. The child will
+                # exec the requested shell command (args) so it becomes the
+                # controlling terminal process.
+                pid, master_fd = _pty.fork()
+                if pid == 0:
+                    # Child process: exec the shell
+                    try:
+                        os.execvp(args[0], args)
+                    except Exception:
+                        # If exec fails, exit child process
+                        os._exit(1)
+                else:
+                    # Parent process: store master_fd and pid
+                    proc = None
+                    slave_fd = None
+            else:
+                master_fd, slave_fd = _os.openpty()
+                # Prepare a preexec function that sets session id and assigns the
+                # controlling terminal (TIOCSCTTY) for job control in the child.
+                def _preexec():
+                    try:
+                        if hasattr(os, 'setsid'):
+                            os.setsid()
+                    except Exception:
+                        pass
+                    try:
+                        # set controlling terminal on *nix systems
+                        import fcntl as _fcntl
+                        import termios as _termios
+                        _fcntl.ioctl(slave_fd, _termios.TIOCSCTTY, 0)
+                    except Exception:
+                        # Best effort; ignore failures (Windows, or permissions)
+                        pass
+
+                proc = subprocess.Popen(
+                    args,
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    close_fds=True,
+                    preexec_fn=_preexec if hasattr(os, 'setsid') else None
+                )
+            # Save session; if we used pty.fork then proc will be None and we
+            # store the forked pid instead so we can stop the session later.
+            sess_record = {
                 "master_fd": master_fd,
                 "slave_fd": slave_fd,
                 "process": proc
             }
+            if use_fork and pid:
+                sess_record["pid"] = pid
+            self.shell_sessions[session_id] = sess_record
 
             # Start reader task
             task = asyncio.create_task(self._session_reader(session_id))
@@ -988,7 +1035,8 @@ class MicroHackAgent:
 
             response["data"] = {"session_id": session_id}
             response["success"] = True
-            self.log(f"Started shell session {session_id} with pid {proc.pid}")
+            pid_info = proc.pid if proc else sess_record.get("pid")
+            self.log(f"Started shell session {session_id} with pid {pid_info}")
             return response
         except Exception as e:
             response["success"] = False
@@ -1004,7 +1052,8 @@ class MicroHackAgent:
         if not sess:
             return
         master_fd = sess["master_fd"]
-        proc = sess["process"]
+        proc = sess.get("process")
+        pid = sess.get("pid")
         try:
             while True:
                 # Read using executor to avoid blocking event loop
@@ -1029,8 +1078,18 @@ class MicroHackAgent:
                     except Exception as e:
                         self.log(f"Failed to send shell_output for session {session_id}: {e}", "WARNING")
                 # If process exited, break
-                if proc.poll() is not None:
-                    break
+                if proc is not None:
+                    if proc.poll() is not None:
+                        break
+                elif pid:
+                    try:
+                        # Non-blocking check if child has exited
+                        finished_pid, status = os.waitpid(pid, os.WNOHANG)
+                        if finished_pid == pid:
+                            break
+                    except ChildProcessError:
+                        # No child process or already reaped
+                        break
         except Exception as e:
             self.log(f"Session reader error for {session_id}: {e}", "WARNING")
         finally:
@@ -1092,15 +1151,30 @@ class MicroHackAgent:
         if not sess:
             return False, "Session not found"
         proc = sess.get('process')
+        pid = sess.get('pid')
         master_fd = sess.get('master_fd')
         slave_fd = sess.get('slave_fd')
         try:
             if proc and proc.poll() is None:
                 proc.terminate()
+            elif pid:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except Exception:
+                    pass
                 # give it a moment, then kill if still alive
                 await asyncio.sleep(0.2)
-                if proc.poll() is None:
+                if proc and proc.poll() is None:
                     proc.kill()
+                elif pid:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                        try:
+                            os.waitpid(pid, 0)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
             # cancel reader task
             task = self._session_tasks.pop(session_id, None)
             if task:

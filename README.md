@@ -187,6 +187,23 @@ python agent.py
 }
 ```
 
+## Versioning
+
+The agent version is stored in `agent/agent.py` and optionally overridden by `agent/VERSION`.
+Use the `scripts/bump_agent_version.py` utility to bump the semantic version (patch, minor, major) and it will update both files.
+
+Example:
+
+```bash
+# Bump the patch version
+python3 ../scripts/bump_agent_version.py --part patch
+
+# Bump the minor version
+python3 ../scripts/bump_agent_version.py --part minor
+```
+
+When building the Docker image, GitHub Actions will pass the version to the build and label the image accordingly.
+
 **Heartbeat** (sent periodically):
 ```json
 {
