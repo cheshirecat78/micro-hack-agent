@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.8.8"
+VERSION = "1.10.1"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -446,6 +446,436 @@ HEARTBEAT_INTERVAL = 30  # seconds
 PING_INTERVAL = 25  # seconds for WebSocket ping
 
 
+# =============================================================================
+# LOCAL WEBSERVER FOR AGENT CONTROL
+# =============================================================================
+
+class AgentLocalWebServer:
+    """
+    Local web server for agent control and monitoring.
+    Provides a micro-hack styled web UI to control the agent locally.
+    """
+    
+    HTML_TEMPLATE = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>μ micro-hack agent</title>
+    <style>
+        :root {
+            --bg-dark: #0a0a0f;
+            --bg-card: #12121a;
+            --border: #1e1e2d;
+            --cyan: #00d4ff;
+            --purple: #a855f7;
+            --green: #22c55e;
+            --red: #ef4444;
+            --text: #e5e7eb;
+            --text-muted: #6b7280;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        .container { max-width: 800px; margin: 0 auto; padding: 2rem; }
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .logo {
+            font-size: 2rem;
+            font-weight: bold;
+            background: linear-gradient(135deg, var(--cyan), var(--purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .status-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .status-connected { background: rgba(34, 197, 94, 0.2); color: var(--green); border: 1px solid var(--green); }
+        .status-disconnected { background: rgba(239, 68, 68, 0.2); color: var(--red); border: 1px solid var(--red); }
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+        }
+        .card h2 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: var(--cyan);
+        }
+        .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; }
+        .stat {
+            background: rgba(255,255,255,0.02);
+            padding: 1rem;
+            border-radius: 0.5rem;
+        }
+        .stat-label { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem; }
+        .stat-value { font-size: 1.125rem; font-weight: 600; font-family: monospace; }
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            border: none;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary { background: var(--cyan); color: #000; }
+        .btn-primary:hover { filter: brightness(1.1); }
+        .btn-danger { background: var(--red); color: #fff; }
+        .btn-secondary { background: var(--border); color: var(--text); }
+        .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; }
+        .log-box {
+            background: #000;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            font-family: monospace;
+            font-size: 0.8rem;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            color: var(--green);
+        }
+        .footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+        .progress-bar {
+            height: 4px;
+            background: var(--border);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--cyan), var(--purple));
+            transition: width 0.3s;
+        }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .pulse { animation: pulse 2s infinite; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">μ</div>
+            <div>
+                <h1 style="font-size: 1.25rem;">micro-hack agent</h1>
+                <div style="font-size: 0.75rem; color: var(--text-muted);">{hostname}</div>
+            </div>
+            <div style="margin-left: auto;">
+                <span class="status-badge {status_class}">{status}</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>System Information</h2>
+            <div class="grid">
+                <div class="stat">
+                    <div class="stat-label">Hostname</div>
+                    <div class="stat-value">{hostname}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Local IP</div>
+                    <div class="stat-value">{local_ip}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">OS</div>
+                    <div class="stat-value">{os_info}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Agent Version</div>
+                    <div class="stat-value">v{version}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Resource Usage</h2>
+            <div class="grid">
+                <div class="stat">
+                    <div class="stat-label">CPU Usage</div>
+                    <div class="stat-value">{cpu_percent}%</div>
+                    <div class="progress-bar"><div class="progress-fill" style="width: {cpu_percent}%"></div></div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Memory Usage</div>
+                    <div class="stat-value">{memory_percent}%</div>
+                    <div class="progress-bar"><div class="progress-fill" style="width: {memory_percent}%"></div></div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Disk Usage</div>
+                    <div class="stat-value">{disk_percent}%</div>
+                    <div class="progress-bar"><div class="progress-fill" style="width: {disk_percent}%"></div></div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Uptime</div>
+                    <div class="stat-value">{uptime}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Server Connection</h2>
+            <div class="grid">
+                <div class="stat">
+                    <div class="stat-label">Server URL</div>
+                    <div class="stat-value" style="font-size: 0.8rem; word-break: break-all;">{server_url}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Remote IP</div>
+                    <div class="stat-value">{remote_ip}</div>
+                </div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary" onclick="location.reload()">Refresh</button>
+                <button class="btn btn-secondary" onclick="fetch('/api/ping')">Ping Server</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Recent Logs</h2>
+            <div class="log-box" id="logs">{logs}</div>
+        </div>
+
+        <div class="footer">
+            micro-hack agent v{version} • Local Web UI<br>
+            <span style="color: var(--cyan);">https://micro-hack.nl</span>
+        </div>
+    </div>
+    <script>
+        // Auto-refresh every 5 seconds
+        setTimeout(() => location.reload(), 5000);
+    </script>
+</body>
+</html>'''
+
+    def __init__(self, agent, port: int = 8888, token: str = None):
+        self.agent = agent
+        self.port = port
+        self.token = token
+        self.server = None
+        self.running = False
+        self._log_buffer = []
+        self._max_logs = 50
+    
+    def add_log(self, message: str):
+        """Add a log message to the buffer"""
+        timestamp = datetime.utcnow().strftime("%H:%M:%S")
+        self._log_buffer.append(f"[{timestamp}] {message}")
+        if len(self._log_buffer) > self._max_logs:
+            self._log_buffer = self._log_buffer[-self._max_logs:]
+    
+    def _get_system_metrics(self) -> dict:
+        """Get current system metrics"""
+        metrics = {
+            "cpu_percent": 0,
+            "memory_percent": 0,
+            "disk_percent": 0,
+            "uptime": "N/A"
+        }
+        
+        if PSUTIL_AVAILABLE:
+            try:
+                metrics["cpu_percent"] = round(psutil.cpu_percent(interval=0.1), 1)
+                metrics["memory_percent"] = round(psutil.virtual_memory().percent, 1)
+                metrics["disk_percent"] = round(psutil.disk_usage('/').percent, 1)
+                
+                # Calculate uptime
+                boot_time = psutil.boot_time()
+                uptime_seconds = int(datetime.now().timestamp() - boot_time)
+                days, remainder = divmod(uptime_seconds, 86400)
+                hours, remainder = divmod(remainder, 3600)
+                minutes, _ = divmod(remainder, 60)
+                if days > 0:
+                    metrics["uptime"] = f"{days}d {hours}h {minutes}m"
+                elif hours > 0:
+                    metrics["uptime"] = f"{hours}h {minutes}m"
+                else:
+                    metrics["uptime"] = f"{minutes}m"
+            except:
+                pass
+        
+        return metrics
+    
+    def _render_page(self) -> str:
+        """Render the main HTML page"""
+        metrics = self._get_system_metrics()
+        
+        status = "Connected" if self.agent.connected else "Disconnected"
+        status_class = "status-connected" if self.agent.connected else "status-disconnected"
+        
+        return self.HTML_TEMPLATE.format(
+            hostname=self.agent.hostname,
+            local_ip=self.agent.local_ip,
+            remote_ip=self.agent.remote_ip or "N/A",
+            os_info=self.agent.os_info,
+            version=VERSION,
+            status=status,
+            status_class=status_class,
+            server_url=self.agent.server_url,
+            cpu_percent=metrics["cpu_percent"],
+            memory_percent=metrics["memory_percent"],
+            disk_percent=metrics["disk_percent"],
+            uptime=metrics["uptime"],
+            logs="\\n".join(self._log_buffer[-20:]) or "No recent logs"
+        )
+    
+    async def _handle_request(self, reader, writer):
+        """Handle incoming HTTP request"""
+        try:
+            request_line = await asyncio.wait_for(reader.readline(), timeout=5)
+            if not request_line:
+                writer.close()
+                return
+            
+            request = request_line.decode('utf-8', errors='ignore').strip()
+            
+            # Read headers
+            headers = {}
+            while True:
+                header_line = await asyncio.wait_for(reader.readline(), timeout=5)
+                if header_line == b'\\r\\n' or header_line == b'\\n' or not header_line:
+                    break
+                try:
+                    key, value = header_line.decode('utf-8', errors='ignore').strip().split(':', 1)
+                    headers[key.lower()] = value.strip()
+                except:
+                    pass
+            
+            # Parse request
+            parts = request.split()
+            if len(parts) < 2:
+                writer.close()
+                return
+            
+            method, path = parts[0], parts[1]
+            
+            # Token authentication if enabled
+            if self.token:
+                auth_header = headers.get('authorization', '')
+                query_token = None
+                if '?' in path:
+                    path_parts = path.split('?')
+                    path = path_parts[0]
+                    for param in path_parts[1].split('&'):
+                        if param.startswith('token='):
+                            query_token = param[6:]
+                            break
+                
+                if not (auth_header == f'Bearer {self.token}' or query_token == self.token):
+                    # Send 401 Unauthorized
+                    response = "HTTP/1.1 401 Unauthorized\\r\\n"
+                    response += "Content-Type: text/plain\\r\\n"
+                    response += "\\r\\n"
+                    response += "Unauthorized - Token required"
+                    writer.write(response.encode())
+                    await writer.drain()
+                    writer.close()
+                    return
+            
+            # Route requests
+            if path == '/' or path == '/index.html':
+                content = self._render_page()
+                response = "HTTP/1.1 200 OK\\r\\n"
+                response += "Content-Type: text/html; charset=utf-8\\r\\n"
+                response += f"Content-Length: {len(content.encode())}\\r\\n"
+                response += "\\r\\n"
+                writer.write(response.encode() + content.encode())
+            
+            elif path == '/api/status':
+                data = {
+                    "connected": self.agent.connected,
+                    "hostname": self.agent.hostname,
+                    "version": VERSION,
+                    "metrics": self._get_system_metrics()
+                }
+                content = json.dumps(data)
+                response = "HTTP/1.1 200 OK\\r\\n"
+                response += "Content-Type: application/json\\r\\n"
+                response += f"Content-Length: {len(content)}\\r\\n"
+                response += "\\r\\n"
+                writer.write(response.encode() + content.encode())
+            
+            elif path == '/api/ping':
+                content = json.dumps({"pong": True, "timestamp": datetime.utcnow().isoformat()})
+                response = "HTTP/1.1 200 OK\\r\\n"
+                response += "Content-Type: application/json\\r\\n"
+                response += f"Content-Length: {len(content)}\\r\\n"
+                response += "\\r\\n"
+                writer.write(response.encode() + content.encode())
+            
+            elif path == '/favicon.ico':
+                response = "HTTP/1.1 204 No Content\\r\\n\\r\\n"
+                writer.write(response.encode())
+            
+            else:
+                response = "HTTP/1.1 404 Not Found\\r\\n"
+                response += "Content-Type: text/plain\\r\\n"
+                response += "\\r\\n"
+                response += "Not Found"
+                writer.write(response.encode())
+            
+            await writer.drain()
+        except asyncio.TimeoutError:
+            pass
+        except Exception as e:
+            print(f"[WEBSERVER] Error handling request: {e}", flush=True)
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except:
+                pass
+    
+    async def start(self):
+        """Start the local web server"""
+        if self.running:
+            return
+        
+        try:
+            self.server = await asyncio.start_server(
+                self._handle_request,
+                '0.0.0.0',
+                self.port
+            )
+            self.running = True
+            self.add_log(f"Local web server started on port {self.port}")
+            print(f"[WEBSERVER] Started on http://0.0.0.0:{self.port}", flush=True)
+            
+            async with self.server:
+                await self.server.serve_forever()
+        except Exception as e:
+            print(f"[WEBSERVER] Failed to start: {e}", flush=True)
+            self.running = False
+    
+    async def stop(self):
+        """Stop the local web server"""
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+            self.running = False
+            self.add_log("Local web server stopped")
+            print("[WEBSERVER] Stopped", flush=True)
+
+
 class MicroHackAgent:
     """Remote agent that connects to micro-hack server via WebSocket"""
     
@@ -491,6 +921,13 @@ class MicroHackAgent:
         self.network_interfaces = []
         # Session reader tasks: session_id -> asyncio.Task
         self._session_tasks = {}
+        
+        # Local webserver for agent control
+        self._local_webserver: Optional[AgentLocalWebServer] = None
+        self._webserver_task: Optional[asyncio.Task] = None
+        self._webserver_enabled = False
+        self._webserver_port = 8888
+        self._webserver_token = None
     
     def _get_local_ip(self) -> str:
         """Get local IP address"""
@@ -1040,6 +1477,18 @@ class MicroHackAgent:
                     close_fds=True,
                     preexec_fn=_preexec if hasattr(os, 'setsid') else None
                 )
+            
+            # Set initial terminal size (80x24 is standard default)
+            try:
+                import fcntl as _fcntl
+                import termios as _termios
+                import struct as _struct
+                winsize = _struct.pack('HHHH', 24, 80, 0, 0)  # rows, cols, xpix, ypix
+                _fcntl.ioctl(master_fd, _termios.TIOCSWINSZ, winsize)
+                self.log("Set initial terminal size to 80x24", "DEBUG")
+            except Exception as e:
+                self.log(f"Could not set initial terminal size: {e}", "DEBUG")
+            
             # Save session; if we used pty.fork then proc will be None and we
             # store the forked pid instead so we can stop the session later.
             sess_record = {
@@ -4779,6 +5228,26 @@ apt-get install -y speedtest
                     "data": {"session_id": session_id},
                     "error": None if ok else msg
                 }
+            elif command == "webserver_start":
+                # Start local web server
+                port = command_data.get('port', 8888)
+                token = command_data.get('token')
+                response = await self._start_webserver(command_id, port, token)
+            elif command == "webserver_stop":
+                # Stop local web server
+                response = await self._stop_webserver(command_id)
+            elif command == "webserver_status":
+                # Get webserver status
+                response = {
+                    "type": "response",
+                    "command_id": command_id,
+                    "success": True,
+                    "data": {
+                        "running": self._webserver_enabled and self._local_webserver is not None and self._local_webserver.running,
+                        "port": self._webserver_port,
+                        "url": f"http://{self.local_ip}:{self._webserver_port}" if self._webserver_enabled else None
+                    }
+                }
             else:
                 response["success"] = False
                 response["error"] = f"Unknown command: {command}"
@@ -4983,6 +5452,91 @@ apt-get install -y speedtest
                 self.log(f"Reconnecting in {self.reconnect_delay} seconds...")
                 await asyncio.sleep(self.reconnect_delay)
                 self.reconnect_delay = min(self.reconnect_delay * 2, MAX_RECONNECT_DELAY)
+    
+    async def _start_webserver(self, command_id: str, port: int = 8888, token: str = None) -> dict:
+        """Start the local web server"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        try:
+            # Stop existing webserver if running
+            if self._local_webserver and self._local_webserver.running:
+                await self._local_webserver.stop()
+                if self._webserver_task:
+                    self._webserver_task.cancel()
+                    try:
+                        await self._webserver_task
+                    except asyncio.CancelledError:
+                        pass
+            
+            # Create and start new webserver
+            self._webserver_port = port
+            self._webserver_token = token
+            self._local_webserver = AgentLocalWebServer(self, port, token)
+            self._webserver_enabled = True
+            
+            # Start in background task
+            self._webserver_task = asyncio.create_task(self._local_webserver.start())
+            
+            # Wait a moment for it to start
+            await asyncio.sleep(0.5)
+            
+            url = f"http://{self.local_ip}:{port}"
+            if token:
+                url += f"?token={token}"
+            
+            response["data"] = {
+                "running": True,
+                "port": port,
+                "url": url,
+                "token_required": token is not None
+            }
+            self.log(f"Local webserver started on port {port}")
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Failed to start webserver: {e}", "ERROR")
+        
+        return response
+    
+    async def _stop_webserver(self, command_id: str) -> dict:
+        """Stop the local web server"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        try:
+            if self._local_webserver and self._local_webserver.running:
+                await self._local_webserver.stop()
+            
+            if self._webserver_task:
+                self._webserver_task.cancel()
+                try:
+                    await self._webserver_task
+                except asyncio.CancelledError:
+                    pass
+                self._webserver_task = None
+            
+            self._webserver_enabled = False
+            self._local_webserver = None
+            
+            response["data"] = {"running": False}
+            self.log("Local webserver stopped")
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Failed to stop webserver: {e}", "ERROR")
+        
+        return response
     
     def stop(self):
         """Stop the agent"""
