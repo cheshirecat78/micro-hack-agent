@@ -1440,7 +1440,19 @@ class MicroHackAgent:
                 # controlling terminal process.
                 pid, master_fd = _pty.fork()
                 if pid == 0:
-                    # Child process: exec the shell
+                    # Child process: set up environment and exec the shell
+                    try:
+                        # Set TERM so the shell knows terminal capabilities
+                        os.environ['TERM'] = 'xterm-256color'
+                        # Set initial terminal size BEFORE exec
+                        import fcntl as _fcntl
+                        import termios as _termios
+                        import struct as _struct
+                        import sys
+                        winsize = _struct.pack('HHHH', 24, 80, 0, 0)  # rows, cols
+                        _fcntl.ioctl(sys.stdout.fileno(), _termios.TIOCSWINSZ, winsize)
+                    except Exception:
+                        pass
                     try:
                         os.execvp(args[0], args)
                     except Exception:
@@ -1452,6 +1464,16 @@ class MicroHackAgent:
                     slave_fd = None
             else:
                 master_fd, slave_fd = _os.openpty()
+                # Set terminal size on slave before spawning shell
+                try:
+                    import fcntl as _fcntl
+                    import termios as _termios
+                    import struct as _struct
+                    winsize = _struct.pack('HHHH', 24, 80, 0, 0)  # rows, cols
+                    _fcntl.ioctl(slave_fd, _termios.TIOCSWINSZ, winsize)
+                except Exception:
+                    pass
+                    
                 # Prepare a preexec function that sets session id and assigns the
                 # controlling terminal (TIOCSCTTY) for job control in the child.
                 def _preexec():
@@ -1469,25 +1491,30 @@ class MicroHackAgent:
                         # Best effort; ignore failures (Windows, or permissions)
                         pass
 
+                # Set up environment with TERM
+                env = os.environ.copy()
+                env['TERM'] = 'xterm-256color'
+                
                 proc = subprocess.Popen(
                     args,
                     stdin=slave_fd,
                     stdout=slave_fd,
                     stderr=slave_fd,
                     close_fds=True,
-                    preexec_fn=_preexec if hasattr(os, 'setsid') else None
+                    preexec_fn=_preexec if hasattr(os, 'setsid') else None,
+                    env=env
                 )
             
             # Set initial terminal size (80x24 is standard default)
+            # This is a safety net - both fork paths set size before exec
             try:
                 import fcntl as _fcntl
                 import termios as _termios
                 import struct as _struct
                 winsize = _struct.pack('HHHH', 24, 80, 0, 0)  # rows, cols, xpix, ypix
                 _fcntl.ioctl(master_fd, _termios.TIOCSWINSZ, winsize)
-                self.log("Set initial terminal size to 80x24", "DEBUG")
             except Exception as e:
-                self.log(f"Could not set initial terminal size: {e}", "DEBUG")
+                self.log(f"Could not set terminal size on master: {e}", "DEBUG")
             
             # Save session; if we used pty.fork then proc will be None and we
             # store the forked pid instead so we can stop the session later.
@@ -1521,20 +1548,24 @@ class MicroHackAgent:
         loop = asyncio.get_event_loop()
         sess = self.shell_sessions.get(session_id)
         if not sess:
+            self.log(f"Session {session_id} not found in reader", "WARNING")
             return
         master_fd = sess["master_fd"]
         proc = sess.get("process")
         pid = sess.get("pid")
+        self.log(f"Starting reader for session {session_id}, master_fd={master_fd}", "DEBUG")
         try:
             while True:
                 # Read using executor to avoid blocking event loop
                 data = await loop.run_in_executor(None, _os.read, master_fd, 4096)
                 if not data:
+                    self.log(f"Session {session_id} reader got EOF", "DEBUG")
                     break
                 try:
                     output = data.decode('utf-8', errors='replace')
                 except Exception:
                     output = str(data)
+                self.log(f"Session {session_id} read {len(data)} bytes", "DEBUG")
                 # Send shell_output message
                 if self.ws:
                     try:
