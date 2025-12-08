@@ -455,6 +455,8 @@ class MicroHackAgent:
         self.remote_ip = None
         self.location = None
         self.network_interfaces = []
+        # Session reader tasks: session_id -> asyncio.Task
+        self._session_tasks = {}
     
     def _get_local_ip(self) -> str:
         """Get local IP address"""
@@ -917,6 +919,186 @@ class MicroHackAgent:
             self.log(f"Job {job_id[:8]} output: {output_line.strip()}", "DEBUG")
         except Exception as e:
             self.log(f"Failed to send job output: {e}", "WARNING")
+
+    async def start_shell_session(self, command_id: str, command: str) -> dict:
+        """Start a PTY-backed shell session and stream output back to server.
+
+        Returns a response dict including session_id on success.
+        """
+        import uuid as _uuid
+        import os as _os
+        import shlex as _shlex
+
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+
+        session_id = str(_uuid.uuid4())
+        # Build command
+        try:
+            args = _shlex.split(command)
+        except Exception:
+            args = [command]
+
+        try:
+            master_fd, slave_fd = _os.openpty()
+            proc = subprocess.Popen(
+                args,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
+            )
+            # Save session
+            self.shell_sessions[session_id] = {
+                "master_fd": master_fd,
+                "slave_fd": slave_fd,
+                "process": proc
+            }
+
+            # Start reader task
+            task = asyncio.create_task(self._session_reader(session_id))
+            self._session_tasks[session_id] = task
+
+            response["data"] = {"session_id": session_id}
+            response["success"] = True
+            self.log(f"Started shell session {session_id} with pid {proc.pid}")
+            return response
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            return response
+
+    async def _session_reader(self, session_id: str):
+        """Read from the PTY master and send shell_output messages to the server as data arrives."""
+        import os as _os
+        import json as _json
+        loop = asyncio.get_event_loop()
+        sess = self.shell_sessions.get(session_id)
+        if not sess:
+            return
+        master_fd = sess["master_fd"]
+        proc = sess["process"]
+        try:
+            while True:
+                # Read using executor to avoid blocking event loop
+                data = await loop.run_in_executor(None, _os.read, master_fd, 4096)
+                if not data:
+                    break
+                try:
+                    output = data.decode('utf-8', errors='replace')
+                except Exception:
+                    output = str(data)
+                # Send shell_output message
+                if self.ws:
+                    try:
+                        msg = json.dumps({
+                            "type": "shell_output",
+                            "session_id": session_id,
+                            "output": output,
+                            "agent_id": self.agent_id,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        await self.ws.send(msg)
+                    except Exception as e:
+                        self.log(f"Failed to send shell_output for session {session_id}: {e}", "WARNING")
+                # If process exited, break
+                if proc.poll() is not None:
+                    break
+        except Exception as e:
+            self.log(f"Session reader error for {session_id}: {e}", "WARNING")
+        finally:
+            try:
+                _os.close(master_fd)
+            except Exception:
+                pass
+
+    async def write_shell_input(self, session_id: str, input_str: str) -> tuple[bool, str]:
+        """Write input to the PTY master for a given session.
+
+        Returns (ok, message)
+        """
+        import os as _os
+        sess = self.shell_sessions.get(session_id)
+        if not sess:
+            return False, "Session not found"
+        master_fd = sess.get('master_fd')
+        if not master_fd:
+            return False, "Invalid session"
+        try:
+            if isinstance(input_str, str):
+                data = input_str.encode('utf-8')
+            else:
+                data = bytes(input_str)
+            # Ensure newline at end if not present? Keep as is - caller handles
+            _os.write(master_fd, data)
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+
+    async def resize_shell_session(self, session_id: str, rows: int, cols: int) -> tuple[bool, str]:
+        """Resize a PTY session's window size (rows x cols) using ioctl."""
+        import fcntl as _fcntl
+        import termios as _termios
+        import struct as _struct
+        import os as _os
+
+        sess = self.shell_sessions.get(session_id)
+        if not sess:
+            return False, "Session not found"
+        master_fd = sess.get('master_fd')
+        if not master_fd:
+            return False, "Invalid session"
+
+        try:
+            # Build winsize struct: rows, cols, xpixels, ypixels
+            winsize = _struct.pack('HHHH', int(rows), int(cols), 0, 0)
+            _fcntl.ioctl(master_fd, _termios.TIOCSWINSZ, winsize)
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+
+    async def stop_shell_session(self, session_id: str) -> tuple[bool, str]:
+        """Stop a shell PTY session and clean up resources."""
+        import os as _os
+        sess = self.shell_sessions.get(session_id)
+        if not sess:
+            return False, "Session not found"
+        proc = sess.get('process')
+        master_fd = sess.get('master_fd')
+        slave_fd = sess.get('slave_fd')
+        try:
+            if proc and proc.poll() is None:
+                proc.terminate()
+                # give it a moment, then kill if still alive
+                await asyncio.sleep(0.2)
+                if proc.poll() is None:
+                    proc.kill()
+            # cancel reader task
+            task = self._session_tasks.pop(session_id, None)
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            try:
+                _os.close(master_fd)
+            except Exception:
+                pass
+            try:
+                _os.close(slave_fd)
+            except Exception:
+                pass
+            self.shell_sessions.pop(session_id, None)
+            self.log(f"Stopped shell session {session_id}")
+            return True, ""
+        except Exception as e:
+            return False, str(e)
     
     async def handle_message(self, message: str):
         """Handle incoming message from server"""
@@ -4319,7 +4501,7 @@ apt-get install -y speedtest
             elif command == "capabilities":
                 # Return what this agent can do
                 response["data"] = {
-                    "commands": ["ping", "host_ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "dns_server", "dig", "ip_reputation", "domain_reputation", "speedtest", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent", "restart", "run_command"],
+                    "commands": ["ping", "host_ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "dns_server", "dig", "ip_reputation", "domain_reputation", "speedtest", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent", "restart", "run_command", "shell_start", "shell_input", "shell_stop", "shell_resize"],
                     "nmap_available": shutil.which("nmap") is not None,
                     "nikto_available": shutil.which("nikto") is not None,
                     "dirb_available": shutil.which("dirb") is not None,
@@ -4398,6 +4580,45 @@ apt-get install -y speedtest
                         response["success"] = False
                         response["error"] = str(e)
             
+            elif command == "shell_start":
+                # Start a new PTY-based shell session and stream output
+                cmd = command_data.get('command') or '/bin/sh'
+                response = await self.start_shell_session(command_id, cmd)
+            elif command == "shell_input":
+                # Write input to an existing session (fire and forget)
+                session_id = command_data.get('session_id')
+                inp = command_data.get('input', '')
+                ok, msg = await self.write_shell_input(session_id, inp)
+                response = {
+                    "type": "response",
+                    "command_id": command_id,
+                    "success": ok,
+                    "data": {"session_id": session_id},
+                    "error": None if ok else msg
+                }
+            elif command == "shell_stop":
+                session_id = command_data.get('session_id')
+                ok, msg = await self.stop_shell_session(session_id)
+                response = {
+                    "type": "response",
+                    "command_id": command_id,
+                    "success": ok,
+                    "data": {"session_id": session_id},
+                    "error": None if ok else msg
+                }
+            elif command == "shell_resize":
+                # Resize pty window
+                session_id = command_data.get('session_id')
+                rows = command_data.get('rows') or command_data.get('rows', 24)
+                cols = command_data.get('cols') or command_data.get('cols', 80)
+                ok, msg = await self.resize_shell_session(session_id, rows, cols)
+                response = {
+                    "type": "response",
+                    "command_id": command_id,
+                    "success": ok,
+                    "data": {"session_id": session_id},
+                    "error": None if ok else msg
+                }
             else:
                 response["success"] = False
                 response["error"] = f"Unknown command: {command}"
