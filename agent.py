@@ -1412,8 +1412,14 @@ class MicroHackAgent:
         
         scan_type = command_data.get("scan_type", "quick")
         ports = command_data.get("ports")
-        # Support both 'arguments' and legacy 'options' keys from dispatcher
-        extra_args = command_data.get("arguments", "") or command_data.get("options", "")
+        # Support 'arguments' for extra CLI args (must be string, not dict)
+        # 'options' is now a dict for structured data, so only use it if it's a string
+        extra_args = command_data.get("arguments", "")
+        if not extra_args:
+            opts = command_data.get("options")
+            if isinstance(opts, str):
+                extra_args = opts
+            # If options is a dict, ignore it for CLI args - it's structured data
         project_id = command_data.get("project_id")  # For associating results
         
         # Build nmap command
@@ -1448,7 +1454,7 @@ class MicroHackAgent:
             cmd.extend(["-T4", "-F"])
         
         # Add extra arguments if provided (be careful with this)
-        if extra_args:
+        if extra_args and isinstance(extra_args, str):
             # Only allow safe arguments
             safe_args = extra_args.replace(";", "").replace("&", "").replace("|", "")
             cmd.extend(safe_args.split())
