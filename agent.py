@@ -458,6 +458,10 @@ class MicroHackAgent:
         self._install_lock: asyncio.Lock = None  # Created in run()
         self._installing_tool: str = None  # Currently installing tool name
         
+        # Spam prevention: 3-second cooldown between commands
+        self._last_command_time: float = 0.0
+        self._command_cooldown: float = 3.0  # seconds
+        
         # Gather system info
         # Shell sessions map: session_id -> { "master_fd": int, "process": subprocess.Popen }
         self.shell_sessions = {}
@@ -4390,6 +4394,19 @@ apt-get install -y speedtest
     
     async def handle_command(self, data: dict):
         """Handle a command from the server"""
+        import time
+        
+        # Spam prevention: enforce 3-second cooldown between commands
+        current_time = time.time()
+        time_since_last_command = current_time - self._last_command_time
+        if time_since_last_command < self._command_cooldown:
+            wait_time = self._command_cooldown - time_since_last_command
+            self.log(f"Command received but cooldown active ({wait_time:.1f}s remaining), waiting...", "DEBUG")
+            await asyncio.sleep(wait_time)
+        
+        # Update last command time
+        self._last_command_time = time.time()
+        
         # Handler stubs for new nmap command variants
         async def run_nmap_quick_scan(command_id, command_data):
             command_data = dict(command_data)
