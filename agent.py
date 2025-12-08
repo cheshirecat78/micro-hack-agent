@@ -889,6 +889,24 @@ class MicroHackAgent:
             self.log(f"Job {job_id[:8]} progress: {progress}% - {message}", "DEBUG")
         except Exception as e:
             self.log(f"Failed to send job progress: {e}", "WARNING")
+
+    async def send_job_output(self, job_id: str, output_line: str):
+        """Send a single command output line back to server for live UI streaming"""
+        if not self.ws or not job_id or not output_line:
+            return
+
+        try:
+            output_msg = {
+                "type": "job_output",
+                "job_id": job_id,
+                "line": output_line,
+                "agent_id": self.agent_id,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            await self.ws.send(json.dumps(output_msg))
+            self.log(f"Job {job_id[:8]} output: {output_line.strip()}", "DEBUG")
+        except Exception as e:
+            self.log(f"Failed to send job output: {e}", "WARNING")
     
     async def handle_message(self, message: str):
         """Handle incoming message from server"""
@@ -1189,6 +1207,13 @@ class MicroHackAgent:
                 async def read_stdout():
                     nonlocal stdout_data
                     stdout_data = await process.stdout.read()
+                    # Stream full stdout as job_output if job exists
+                    if job_id and stdout_data:
+                        try:
+                            for line in stdout_data.decode('utf-8', errors='replace').splitlines():
+                                await self.send_job_output(job_id, line)
+                        except Exception:
+                            pass
 
                 async def read_stderr_with_progress():
                     nonlocal stderr_data, last_progress
@@ -1198,6 +1223,12 @@ class MicroHackAgent:
                             break
                         stderr_data += line
                         line_str = line.decode("utf-8", errors="replace")
+                        # Also stream stderr as job_output
+                        if job_id and line_str.strip():
+                            try:
+                                await self.send_job_output(job_id, f"[stderr] {line_str.strip()}")
+                            except Exception:
+                                pass
                         # Debug: log stderr lines so we can see nmap progress output
                         try:
                             self.log(f"nmap stderr: {line_str.strip()}", "DEBUG")
@@ -1599,6 +1630,12 @@ class MicroHackAgent:
                         break
                     line_str = line.decode("utf-8", errors="replace").strip()
                     output_lines.append(line_str)
+                    # Stream line back to server for live UI output
+                    if job_id and line_str:
+                        try:
+                            await self.send_job_output(job_id, line_str)
+                        except Exception:
+                            pass
                     
                     # Parse results as they come in
                     if line_str.startswith("+ ") or line_str.startswith("==> DIRECTORY: "):
@@ -1882,6 +1919,12 @@ class MicroHackAgent:
                     line_str = line.decode("utf-8", errors="replace").strip()
                     if not line_str:
                         continue
+                    # Stream line back to server for live UI output
+                    if job_id and line_str:
+                        try:
+                            await self.send_job_output(job_id, line_str)
+                        except Exception:
+                            pass
                     
                     # Parse results: /path (Status: 200) [Size: 1234]
                     if "(Status:" in line_str:
