@@ -927,8 +927,184 @@ class AgentLocalWebServer:
             print("[WEBSERVER] Stopped", flush=True)
 
 
+# =============================================================================
+# HTTP FALLBACK CLIENT
+# =============================================================================
+
+class HTTPFallbackClient:
+    """
+    HTTP polling fallback for when WebSocket connections are blocked.
+    
+    Uses standard HTTPS API calls to:
+    1. Poll for pending commands
+    2. Submit command results
+    3. Send heartbeats to stay online
+    """
+    
+    def __init__(self, server_url: str, api_key: str):
+        """
+        Initialize HTTP fallback client.
+        
+        Args:
+            server_url: WebSocket URL (will be converted to HTTPS)
+            api_key: Agent API key
+        """
+        # Convert WebSocket URL to HTTP
+        if server_url.startswith("wss://"):
+            self.base_url = "https://" + server_url[6:]
+        elif server_url.startswith("ws://"):
+            self.base_url = "http://" + server_url[5:]
+        else:
+            self.base_url = server_url
+            
+        # Remove WebSocket path
+        if "/ws/agent" in self.base_url:
+            self.base_url = self.base_url.split("/ws/agent")[0]
+        elif "/ws" in self.base_url:
+            self.base_url = self.base_url.split("/ws")[0]
+            
+        self.base_url = self.base_url.rstrip('/')
+        self.api_key = api_key
+        self.poll_interval = 5  # seconds between polls
+        self.heartbeat_interval = 30  # seconds between heartbeats
+        self.connected = False
+        self.agent_id = None
+        
+    def log(self, message: str, level: str = "INFO"):
+        """Log with HTTP prefix"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] [HTTP] [{level}] {message}", flush=True)
+        
+    def _make_request(self, method: str, endpoint: str, data: dict = None, timeout: int = 30) -> dict:
+        """Make an HTTP request to the server"""
+        import urllib.request
+        import urllib.error
+        
+        url = f"{self.base_url}{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": f"micro-hack-agent/{VERSION}"
+        }
+        
+        try:
+            if data:
+                body = json.dumps(data).encode('utf-8')
+                req = urllib.request.Request(url, data=body, headers=headers, method=method)
+            else:
+                req = urllib.request.Request(url, headers=headers, method=method)
+                
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                response_data = resp.read().decode('utf-8')
+                if response_data:
+                    return {"success": True, "data": json.loads(response_data), "status": resp.status}
+                return {"success": True, "data": {}, "status": resp.status}
+                
+        except urllib.error.HTTPError as e:
+            error_body = ""
+            try:
+                error_body = e.read().decode('utf-8')
+            except:
+                pass
+            return {"success": False, "error": f"HTTP {e.code}: {e.reason}", "status": e.code, "body": error_body}
+        except urllib.error.URLError as e:
+            return {"success": False, "error": f"URL Error: {e.reason}", "status": 0}
+        except Exception as e:
+            return {"success": False, "error": str(e), "status": 0}
+            
+    async def register(self, agent_data: dict) -> bool:
+        """Register agent with server via HTTP"""
+        self.log("Registering with server via HTTP...")
+        
+        # Add connection mode to registration
+        agent_data["connection_mode"] = "http_polling"
+        
+        result = self._make_request("POST", "/api/agents/heartbeat", agent_data)
+        
+        if result["success"]:
+            self.connected = True
+            self.agent_id = result["data"].get("agent_id")
+            self.log(f"Registered successfully, agent_id: {self.agent_id}")
+            return True
+        else:
+            self.log(f"Registration failed: {result.get('error')}", "ERROR")
+            return False
+            
+    async def poll_commands(self) -> list:
+        """Poll server for pending commands"""
+        result = self._make_request("GET", "/api/agents/poll")
+        
+        if result["success"]:
+            commands = result["data"].get("commands", [])
+            if commands:
+                self.log(f"Received {len(commands)} pending command(s)")
+            return commands
+        else:
+            if result.get("status") == 401:
+                self.log("Poll failed: Unauthorized (invalid API key)", "ERROR")
+            else:
+                self.log(f"Poll failed: {result.get('error')}", "WARN")
+            return []
+            
+    async def submit_result(self, command_id: str, result_data: dict) -> bool:
+        """Submit command result to server"""
+        payload = {
+            "command_id": command_id,
+            "result": result_data
+        }
+        
+        result = self._make_request("POST", "/api/agents/result", payload)
+        
+        if result["success"]:
+            self.log(f"Result submitted for command {command_id[:8]}...")
+            return True
+        else:
+            self.log(f"Failed to submit result: {result.get('error')}", "ERROR")
+            return False
+            
+    async def heartbeat(self, metrics: dict = None) -> bool:
+        """Send heartbeat to keep agent online"""
+        payload = {
+            "hostname": socket.gethostname(),
+            "platform": platform.system(),
+            "mode": "http_polling",
+            "version": VERSION
+        }
+        
+        if metrics:
+            payload["metrics"] = metrics
+            
+        result = self._make_request("POST", "/api/agents/heartbeat", payload)
+        
+        if result["success"]:
+            return True
+        else:
+            if result.get("status") == 401:
+                self.log("Heartbeat failed: Unauthorized", "ERROR")
+                self.connected = False
+            return False
+            
+    def test_connection(self) -> bool:
+        """Test if HTTP connection to server works"""
+        self.log(f"Testing HTTP connection to {self.base_url}...")
+        
+        # Try a simple health check or the poll endpoint
+        result = self._make_request("GET", "/api/agents/poll", timeout=10)
+        
+        if result["success"]:
+            self.log("HTTP connection successful!")
+            return True
+        elif result.get("status") == 401:
+            # 401 means server is reachable but auth needed - that's OK
+            self.log("HTTP connection successful (auth required)")
+            return True
+        else:
+            self.log(f"HTTP connection failed: {result.get('error')}", "WARN")
+            return False
+
+
 class MicroHackAgent:
-    """Remote agent that connects to micro-hack server via WebSocket"""
+    """Remote agent that connects to micro-hack server via WebSocket (with HTTP fallback)"""
     
     def __init__(self, server_url: str, api_key: str):
         self.server_url = server_url.rstrip("/")
@@ -939,6 +1115,16 @@ class MicroHackAgent:
         self.connected = False
         self.reconnect_delay = RECONNECT_DELAY
         self.key_invalidated = False  # Set when key is deleted/revoked - stops reconnection
+        
+        # Connection mode: "websocket" (preferred) or "http" (fallback)
+        # Can be forced to HTTP via MICROHACK_FORCE_HTTP=1
+        force_http = os.environ.get("MICROHACK_FORCE_HTTP", "").lower() in ("1", "true", "yes")
+        self.connection_mode = "http" if force_http else "websocket"
+        self._http_client: Optional[HTTPFallbackClient] = None
+        self._ws_failed_attempts = 0
+        self._ws_max_failures = 3  # Switch to HTTP after this many WS failures
+        self._http_poll_interval = int(os.environ.get("MICROHACK_HTTP_POLL_INTERVAL", "5"))
+        self._http_heartbeat_interval = 30  # seconds
         
         # Command queue for concurrent processing
         self._command_queue: asyncio.Queue = None  # Created in run()
@@ -6702,8 +6888,27 @@ apt-get install -y speedtest
             response["error"] = str(e)
             self.log(f"Command error: {e}", "ERROR")
         
-        # Send response
-        if self.ws:
+        # Send response (via WebSocket or HTTP depending on mode)
+        await self._send_response(response, data.get("_http_mode", False))
+    
+    async def _send_response(self, response: dict, http_mode: bool = False):
+        """Send a command response via WebSocket or HTTP"""
+        command_id = response.get("command_id", "unknown")
+        
+        # If in HTTP mode or explicitly flagged, send via HTTP
+        if http_mode or self.connection_mode == "http":
+            if self._http_client:
+                try:
+                    response_size = len(json.dumps(response))
+                    self.log(f"Sending HTTP response for command_id: {command_id}, size: {response_size} bytes")
+                    await self._http_client.submit_result(command_id, response)
+                    self.log(f"HTTP response sent successfully for command_id: {command_id}")
+                except Exception as send_err:
+                    self.log(f"Failed to send HTTP response for command_id {command_id}: {send_err}", "ERROR")
+            else:
+                self.log(f"Cannot send HTTP response for command_id {command_id}: no HTTP client", "ERROR")
+        # Otherwise, send via WebSocket
+        elif self.ws:
             try:
                 response_json = json.dumps(response)
                 response_size = len(response_json)
@@ -6713,7 +6918,7 @@ apt-get install -y speedtest
             except Exception as send_err:
                 self.log(f"Failed to send response for command_id {command_id}: {send_err}", "ERROR")
         else:
-            self.log(f"Cannot send response for command_id {command_id}: no WebSocket connection", "ERROR")
+            self.log(f"Cannot send response for command_id {command_id}: no connection", "ERROR")
     
     async def _priority_worker(self, worker_id: int):
         """Worker that processes high-priority commands (info, ping, shell) with no cooldown"""
@@ -6816,7 +7021,7 @@ apt-get install -y speedtest
                 break
     
     async def run(self):
-        """Main agent run loop with auto-reconnect"""
+        """Main agent run loop with auto-reconnect and HTTP fallback"""
         self.running = True
         
         # Create command queues - priority queue for fast commands, regular for scans
@@ -6832,64 +7037,17 @@ apt-get install -y speedtest
         self.log(f"OS: {self.os_info}")
         self.log(f"Local IP: {self.local_ip}")
         self.log(f"Command workers: {self._num_workers} + 2 priority workers")
+        self.log(f"Connection mode: {self.connection_mode.upper()}" + (" (forced via env)" if os.environ.get("MICROHACK_FORCE_HTTP") else " (auto)"))
         
         if not self.api_key:
             self.log("ERROR: MICROHACK_API_KEY environment variable not set!", "ERROR")
             return
         
+        # Initialize HTTP fallback client
+        self._http_client = HTTPFallbackClient(self.server_url, self.api_key)
+        self._http_client.poll_interval = self._http_poll_interval
+        
         while self.running:
-            # Connect
-            if await self.connect():
-                # Start command workers
-                self._worker_tasks = []
-                
-                # 2 priority workers for fast commands (info, ping, shell)
-                for i in range(2):
-                    task = asyncio.create_task(self._priority_worker(i))
-                    self._worker_tasks.append(task)
-                
-                # Regular workers for scan commands
-                for i in range(self._num_workers):
-                    task = asyncio.create_task(self._command_worker(i))
-                    self._worker_tasks.append(task)
-                
-                # Start message and heartbeat loops
-                message_task = asyncio.create_task(self.message_loop())
-                heartbeat_task = asyncio.create_task(self.heartbeat_loop())
-                
-                # Wait for message or heartbeat to complete (connection closed)
-                done, pending = await asyncio.wait(
-                    [message_task, heartbeat_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                # Cancel pending tasks (message/heartbeat)
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                
-                # Cancel worker tasks
-                for task in self._worker_tasks:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                self._worker_tasks = []
-                
-                # Close WebSocket
-                if self.ws:
-                    try:
-                        await self.ws.close()
-                    except:
-                        pass
-                    self.ws = None
-                
-                self.connected = False
-            
             # Check if key was invalidated - stop reconnecting
             if self.key_invalidated:
                 self.log("API key is invalid or deleted. Agent stopping.", "ERROR")
@@ -6897,11 +7055,215 @@ apt-get install -y speedtest
                 self.running = False
                 break
             
-            # Reconnect with backoff
-            if self.running:
-                self.log(f"Reconnecting in {self.reconnect_delay} seconds...")
-                await asyncio.sleep(self.reconnect_delay)
-                self.reconnect_delay = min(self.reconnect_delay * 2, MAX_RECONNECT_DELAY)
+            # Try WebSocket first (preferred)
+            if self.connection_mode == "websocket":
+                if await self.connect():
+                    # Reset failure counter on successful connect
+                    self._ws_failed_attempts = 0
+                    
+                    # Run WebSocket mode
+                    await self._run_websocket_mode()
+                    
+                    # After disconnect, check if we should continue
+                    if not self.running or self.key_invalidated:
+                        break
+                else:
+                    # WebSocket connection failed
+                    self._ws_failed_attempts += 1
+                    self.log(f"WebSocket connection failed ({self._ws_failed_attempts}/{self._ws_max_failures})")
+                    
+                    # After N failures, try HTTP fallback
+                    if self._ws_failed_attempts >= self._ws_max_failures:
+                        self.log("WebSocket connections keep failing, testing HTTP fallback...")
+                        
+                        if self._http_client.test_connection():
+                            self.log("HTTP fallback available! Switching to HTTP polling mode.")
+                            self.connection_mode = "http"
+                            self._ws_failed_attempts = 0
+                            continue  # Skip reconnect delay, go straight to HTTP
+                        else:
+                            self.log("HTTP fallback also failed. Will retry WebSocket.", "WARN")
+                            self._ws_failed_attempts = 0  # Reset and try WS again
+                    
+                    # Reconnect with backoff
+                    if self.running:
+                        self.log(f"Reconnecting in {self.reconnect_delay} seconds...")
+                        await asyncio.sleep(self.reconnect_delay)
+                        self.reconnect_delay = min(self.reconnect_delay * 2, MAX_RECONNECT_DELAY)
+                        
+            # HTTP fallback mode
+            elif self.connection_mode == "http":
+                self.log("Running in HTTP polling mode (WebSocket unavailable)")
+                await self._run_http_mode()
+                
+                # After HTTP mode ends, try WebSocket again
+                if self.running and not self.key_invalidated:
+                    self.log("Attempting to reconnect via WebSocket...")
+                    self.connection_mode = "websocket"
+                    self.reconnect_delay = RECONNECT_DELAY
+    
+    async def _run_websocket_mode(self):
+        """Run the agent in WebSocket mode"""
+        # Start command workers
+        self._worker_tasks = []
+        
+        # 2 priority workers for fast commands (info, ping, shell)
+        for i in range(2):
+            task = asyncio.create_task(self._priority_worker(i))
+            self._worker_tasks.append(task)
+        
+        # Regular workers for scan commands
+        for i in range(self._num_workers):
+            task = asyncio.create_task(self._command_worker(i))
+            self._worker_tasks.append(task)
+        
+        # Start message and heartbeat loops
+        message_task = asyncio.create_task(self.message_loop())
+        heartbeat_task = asyncio.create_task(self.heartbeat_loop())
+        
+        # Wait for message or heartbeat to complete (connection closed)
+        done, pending = await asyncio.wait(
+            [message_task, heartbeat_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        # Cancel pending tasks (message/heartbeat)
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        
+        # Cancel worker tasks
+        for task in self._worker_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._worker_tasks = []
+        
+        # Close WebSocket
+        if self.ws:
+            try:
+                await self.ws.close()
+            except:
+                pass
+            self.ws = None
+        
+        self.connected = False
+        
+    async def _run_http_mode(self):
+        """Run the agent in HTTP polling mode (fallback when WebSocket blocked)"""
+        self.log("Starting HTTP polling mode...")
+        
+        # Collect host info for registration
+        self.refresh_network_info()
+        host_info = self.collect_host_info()
+        
+        # Register via HTTP
+        registration_data = {
+            "hostname": self.hostname,
+            "platform": platform.system(),
+            "version": VERSION,
+            "mode": "http_polling",
+            "agent_id": self.agent_id,
+            "os": self.os_info,
+            "local_ip": self.local_ip,
+            "remote_ip": self.remote_ip,
+            "location": self.location
+        }
+        
+        if not await self._http_client.register(registration_data):
+            self.log("HTTP registration failed", "ERROR")
+            await asyncio.sleep(self.reconnect_delay)
+            return
+            
+        self.connected = True
+        self.log("Connected via HTTP polling")
+        
+        # Start workers for command processing
+        self._worker_tasks = []
+        for i in range(2):
+            task = asyncio.create_task(self._priority_worker(i))
+            self._worker_tasks.append(task)
+        for i in range(self._num_workers):
+            task = asyncio.create_task(self._command_worker(i))
+            self._worker_tasks.append(task)
+        
+        last_heartbeat = 0
+        consecutive_failures = 0
+        max_failures = 10
+        
+        try:
+            while self.running and self.connected and not self.key_invalidated:
+                # Poll for commands
+                try:
+                    commands = await self._http_client.poll_commands()
+                    consecutive_failures = 0  # Reset on success
+                    
+                    for cmd in commands:
+                        # Queue command for processing
+                        command_id = cmd.get("command_id", str(uuid.uuid4()))
+                        command_name = cmd.get("command", "unknown")
+                        command_data = cmd.get("data", {})
+                        
+                        # Create message format expected by process_command
+                        message = {
+                            "type": "command",
+                            "command_id": command_id,
+                            "command": command_name,
+                            "data": command_data,
+                            "_http_mode": True  # Flag to send result via HTTP
+                        }
+                        
+                        # Route to appropriate queue
+                        if command_name in self._fast_commands:
+                            await self._priority_queue.put(message)
+                        else:
+                            await self._command_queue.put(message)
+                            
+                except Exception as e:
+                    consecutive_failures += 1
+                    self.log(f"Poll error: {e}", "WARN")
+                    
+                    if consecutive_failures >= max_failures:
+                        self.log(f"Too many poll failures ({consecutive_failures}), disconnecting", "ERROR")
+                        self.connected = False
+                        break
+                
+                # Send heartbeat periodically
+                now = asyncio.get_event_loop().time()
+                if now - last_heartbeat >= self._http_heartbeat_interval:
+                    metrics = self.get_system_metrics()
+                    if await self._http_client.heartbeat(metrics):
+                        last_heartbeat = now
+                    else:
+                        self.log("Heartbeat failed", "WARN")
+                
+                # Wait before next poll
+                await asyncio.sleep(self._http_poll_interval)
+                
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Clean up workers
+            for task in self._worker_tasks:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self._worker_tasks = []
+            self.connected = False
+            self.log("HTTP polling mode ended")
+    
+    async def _send_http_response(self, response: dict):
+        """Send command response via HTTP (used in HTTP polling mode)"""
+        command_id = response.get("command_id")
+        if command_id and self._http_client:
+            await self._http_client.submit_result(command_id, response)
     
     async def _start_webserver(self, command_id: str, port: int = 8888, token: str = None) -> dict:
         """Start the local web server"""

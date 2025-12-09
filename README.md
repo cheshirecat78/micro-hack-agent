@@ -212,18 +212,47 @@ When running under supervisor, agent.py uses these exit codes:
 | 44 | Redeploy (fresh download) |
 | 99 | Fatal error, don't restart |
 
-## HTTP Fallback (When WebSocket is Blocked)
+## HTTP Fallback (Automatic)
 
-If WebSocket connections are blocked by a firewall/proxy, you can enable HTTP polling:
+The agent now automatically falls back to HTTP polling when WebSocket connections fail.
+
+### How it works:
+
+1. **WebSocket First**: Agent tries WebSocket (preferred, real-time, efficient)
+2. **Automatic Detection**: After 3 consecutive WebSocket failures, agent tests HTTP
+3. **Seamless Switch**: If HTTP works, agent switches to polling mode
+4. **Auto-Recovery**: Agent periodically tries to reconnect via WebSocket
+
+### Connection Modes:
+
+| Mode | Transport | Latency | Efficiency |
+|------|-----------|---------|------------|
+| WebSocket | wss://443 | Real-time | High |
+| HTTP Polling | https://443 | 5 seconds | Lower |
+
+### When HTTP Fallback is Useful:
+
+- Corporate firewalls blocking WebSocket upgrades
+- Proxy servers that don't support WebSocket
+- Network equipment that drops long-lived connections
+- Environments where only HTTPS/443 is allowed
+
+### Manual Override:
+
+You can force HTTP mode from the start:
 
 ```bash
-MICROHACK_HTTP_FALLBACK=1 python supervisor.py
+# Force HTTP polling mode (skip WebSocket attempts)
+MICROHACK_FORCE_HTTP=1 python agent.py
 ```
 
-This polls the server every 5 seconds (configurable) for pending commands.
-Less efficient than WebSocket but works through most corporate firewalls.
+### HTTP Endpoints Used:
 
-**Note**: The backend needs additional endpoints for HTTP fallback (see below).
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/api/agents/poll` | Poll for pending commands |
+| POST | `/api/agents/result` | Submit command results |
+| POST | `/api/agents/heartbeat` | Send heartbeat |
 
 ## Building Locally
 
