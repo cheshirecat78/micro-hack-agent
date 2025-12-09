@@ -65,6 +65,20 @@ from typing import Optional
 from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 
 # =============================================================================
+# SUPERVISOR INTEGRATION
+# =============================================================================
+
+# Exit codes for supervisor communication
+EXIT_NORMAL = 0           # Normal exit, don't restart
+EXIT_RESTART = 42         # Restart requested
+EXIT_UPDATE_RESTART = 43  # Update and restart requested
+EXIT_REDEPLOY = 44        # Redeploy (fresh download) requested
+EXIT_FATAL = 99           # Fatal error, don't restart
+
+# Detect if running under supervisor
+RUNNING_UNDER_SUPERVISOR = os.environ.get("MICROHACK_SUPERVISED", "").lower() in ("1", "true", "yes")
+
+# =============================================================================
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
@@ -207,8 +221,13 @@ def auto_update_on_startup():
         print(f"[UPDATE] Updated to v{new_version}, restarting...", flush=True)
         
         # Restart the agent with the new code
-        # os.execv replaces the current process entirely - most reliable method
-        os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
+        if RUNNING_UNDER_SUPERVISOR:
+            # Exit with update-restart code, supervisor will restart us
+            print("[UPDATE] Exiting with update-restart code (supervisor will restart)", flush=True)
+            sys.exit(EXIT_UPDATE_RESTART)
+        else:
+            # os.execv replaces the current process entirely - most reliable method
+            os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
         
     except Exception as e:
         print(f"[UPDATE] Update check failed: {e} (continuing with current version)", flush=True)
@@ -5920,7 +5939,14 @@ apt-get install -y speedtest
             # Auto-restart after successful update
             await asyncio.sleep(0.5)
             self.log(f"Updated to v{new_version}, restarting...")
-            os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
+            
+            if RUNNING_UNDER_SUPERVISOR:
+                # Exit with update-restart code, supervisor will restart us
+                self.log("Exiting with update-restart code (supervisor will restart)")
+                sys.exit(EXIT_UPDATE_RESTART)
+            else:
+                # Legacy: self-restart using execv
+                os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
             
         except urllib.error.URLError as e:
             response["success"] = False
@@ -6094,7 +6120,14 @@ apt-get install -y speedtest
                 await self.ws.send(json.dumps(response))
             
             await asyncio.sleep(0.5)
-            os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
+            
+            if RUNNING_UNDER_SUPERVISOR:
+                # Exit with redeploy code, supervisor will restart us
+                self.log("Exiting with redeploy code (supervisor will restart)")
+                sys.exit(EXIT_REDEPLOY)
+            else:
+                # Legacy: self-restart using execv
+                os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
             
         except Exception as e:
             response["success"] = False
@@ -6541,11 +6574,17 @@ apt-get install -y speedtest
                 # Send response before restarting
                 if self.ws:
                     await self.ws.send(json.dumps(response))
-                # Schedule restart after a short delay
                 await asyncio.sleep(0.5)
                 self.log("Restarting agent...")
-                current_script = os.path.abspath(__file__)
-                os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
+                
+                if RUNNING_UNDER_SUPERVISOR:
+                    # Exit with restart code, supervisor will restart us
+                    self.log("Exiting with restart code (supervisor will restart)")
+                    sys.exit(EXIT_RESTART)
+                else:
+                    # Legacy: self-restart using execv
+                    current_script = os.path.abspath(__file__)
+                    os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
             elif command == "run_command":
                 # Run a single shell command and return stdout/stderr and code
                 cmd = command_data.get('cmd') or command_data.get('command') or ''

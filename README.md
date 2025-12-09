@@ -172,6 +172,58 @@ Echo back a message (useful for testing).
 |----------|----------|-------------|
 | `MICROHACK_SERVER_URL` | Yes | WebSocket URL (ws:// or wss://) |
 | `MICROHACK_API_KEY` | Yes | Your agent API key from MicroHack |
+| `MICROHACK_SKIP_UPDATE` | No | Set to "1" or "true" to skip auto-update |
+| `MICROHACK_SUPERVISED` | No | Set to "1" when running under supervisor |
+| `MICROHACK_HTTP_FALLBACK` | No | Set to "1" to enable HTTP polling fallback |
+| `MICROHACK_HTTP_POLL_INTERVAL` | No | HTTP poll interval in seconds (default: 5) |
+
+## Supervisor Mode (Recommended)
+
+For production deployments, use `supervisor.py` instead of running `agent.py` directly.
+The supervisor provides:
+
+- **Process Management**: Spawns and monitors agent.py as a subprocess
+- **Graceful Restarts**: Handles restart/update signals via exit codes
+- **Auto-Restart**: Restarts agent on crashes with exponential backoff
+- **Update Support**: Downloads and applies updates, then restarts
+
+### Using the Supervisor
+
+```bash
+# Run supervisor (it will spawn agent.py)
+python supervisor.py
+
+# Or with Docker (recommended)
+docker run -d \
+  -e MICROHACK_SERVER_URL=wss://app.micro-hack.nl \
+  -e MICROHACK_API_KEY=mh_agent_xxx \
+  cheshirecat78/micro-hack-agent:latest python supervisor.py
+```
+
+### Exit Codes
+
+When running under supervisor, agent.py uses these exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Normal exit, don't restart |
+| 42 | Restart requested |
+| 43 | Update and restart |
+| 44 | Redeploy (fresh download) |
+| 99 | Fatal error, don't restart |
+
+## HTTP Fallback (When WebSocket is Blocked)
+
+If WebSocket connections are blocked by a firewall/proxy, you can enable HTTP polling:
+
+```bash
+MICROHACK_HTTP_FALLBACK=1 python supervisor.py
+```
+
+This polls the server every 5 seconds (configurable) for pending commands.
+Less efficient than WebSocket but works through most corporate firewalls.
+
+**Note**: The backend needs additional endpoints for HTTP fallback (see below).
 
 ## Building Locally
 
