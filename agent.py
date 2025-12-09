@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.10"
+VERSION = "1.10.11"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -1842,12 +1842,11 @@ class MicroHackAgent:
             self.log(f"Failed to send job output: {e}", "WARNING")
 
     async def start_shell_session(self, command_id: str, command: str) -> dict:
-        """Start a PTY-backed shell session and stream output back to server.
+        """Start a simple pipe-based shell session and stream output back to server.
 
         Returns a response dict including session_id on success.
         """
         import uuid as _uuid
-        import os as _os
         import shlex as _shlex
 
         response = {
@@ -1858,113 +1857,32 @@ class MicroHackAgent:
         }
 
         session_id = str(_uuid.uuid4())
-        # Build command
+        
         try:
-            args = _shlex.split(command)
-        except Exception:
-            args = [command]
-
-        try:
-            # Use openpty + subprocess approach for all platforms.
-            # pty.fork() can cause issues with the asyncio event loop and 
-            # has been observed to crash agents on both Android/Termux and Debian.
-            # The openpty approach is more reliable with subprocess management.
-            use_fork = False
-            self.log("Using openpty + subprocess for PTY spawn", "DEBUG")
-
-            if use_fork:
-                self.log("Using pty.fork() for PTY spawn (POSIX)", "DEBUG")
-                # Fork a new process attached to a PTY master/slave. The child will
-                # exec the requested shell command (args) so it becomes the
-                # controlling terminal process.
-                pid, master_fd = _pty.fork()
-                if pid == 0:
-                    # Child process: set up environment and exec the shell
-                    try:
-                        # Set TERM so the shell knows terminal capabilities
-                        os.environ['TERM'] = 'xterm-256color'
-                        # Set initial terminal size BEFORE exec
-                        import fcntl as _fcntl
-                        import termios as _termios
-                        import struct as _struct
-                        import sys
-                        winsize = _struct.pack('HHHH', 24, 80, 0, 0)  # rows, cols
-                        _fcntl.ioctl(sys.stdout.fileno(), _termios.TIOCSWINSZ, winsize)
-                    except Exception:
-                        pass
-                    try:
-                        os.execvp(args[0], args)
-                    except Exception:
-                        # If exec fails, exit child process
-                        os._exit(1)
-                else:
-                    # Parent process: store master_fd and pid
-                    proc = None
-                    slave_fd = None
-            else:
-                master_fd, slave_fd = _os.openpty()
-                # Set terminal size on slave before spawning shell
-                try:
-                    import fcntl as _fcntl
-                    import termios as _termios
-                    import struct as _struct
-                    winsize = _struct.pack('HHHH', 24, 80, 0, 0)  # rows, cols
-                    _fcntl.ioctl(slave_fd, _termios.TIOCSWINSZ, winsize)
-                except Exception:
-                    pass
-                    
-                # Prepare a preexec function that sets session id and assigns the
-                # controlling terminal (TIOCSCTTY) for job control in the child.
-                def _preexec():
-                    try:
-                        if hasattr(os, 'setsid'):
-                            os.setsid()
-                    except Exception:
-                        pass
-                    try:
-                        # set controlling terminal on *nix systems
-                        import fcntl as _fcntl
-                        import termios as _termios
-                        _fcntl.ioctl(slave_fd, _termios.TIOCSCTTY, 0)
-                    except Exception:
-                        # Best effort; ignore failures (Windows, or permissions)
-                        pass
-
-                # Set up environment with TERM
-                env = os.environ.copy()
-                env['TERM'] = 'xterm-256color'
-                
-                proc = subprocess.Popen(
-                    args,
-                    stdin=slave_fd,
-                    stdout=slave_fd,
-                    stderr=slave_fd,
-                    close_fds=True,
-                    preexec_fn=_preexec if hasattr(os, 'setsid') else None,
-                    env=env
-                )
+            # Simple pipe-based approach - no PTY complexity
+            self.log(f"Starting simple pipe shell: {command}", "DEBUG")
             
-            # Set initial terminal size (80x24 is standard default)
-            # This is a safety net - both fork paths set size before exec
-            try:
-                import fcntl as _fcntl
-                import termios as _termios
-                import struct as _struct
-                winsize = _struct.pack('HHHH', 24, 80, 0, 0)  # rows, cols, xpix, ypix
-                _fcntl.ioctl(master_fd, _termios.TIOCSWINSZ, winsize)
-            except Exception as e:
-                self.log(f"Could not set terminal size on master: {e}", "DEBUG")
+            # Set up environment
+            env = os.environ.copy()
+            env['TERM'] = 'dumb'  # Simple terminal
             
-            # Save session; if we used pty.fork then proc will be None and we
-            # store the forked pid instead so we can stop the session later.
-            sess_record = {
-                "master_fd": master_fd,
-                "slave_fd": slave_fd,
-                "process": proc
+            # Start shell with pipes
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                bufsize=0  # Unbuffered
+            )
+            
+            # Save session
+            self.shell_sessions[session_id] = {
+                "process": proc,
+                "stdin": proc.stdin,
+                "stdout": proc.stdout
             }
-            if use_fork and pid:
-                sess_record["pid"] = pid
-            self.shell_sessions[session_id] = sess_record
 
             # Start reader task
             task = asyncio.create_task(self._session_reader(session_id))
@@ -1972,47 +1890,49 @@ class MicroHackAgent:
 
             response["data"] = {"session_id": session_id}
             response["success"] = True
-            pid_info = proc.pid if proc else sess_record.get("pid")
-            self.log(f"Started shell session {session_id} with pid {pid_info}")
+            self.log(f"Started shell session {session_id} with pid {proc.pid}")
             return response
         except Exception as e:
+            self.log(f"Failed to start shell: {e}", "ERROR")
             response["success"] = False
             response["error"] = str(e)
             return response
 
     async def _session_reader(self, session_id: str):
-        """Read from the PTY master and send shell_output messages to the server as data arrives."""
-        import os as _os
-        import json as _json
-        import errno as _errno
+        """Read from stdout and send shell_output messages to the server."""
         loop = asyncio.get_event_loop()
         sess = self.shell_sessions.get(session_id)
         if not sess:
             self.log(f"Session {session_id} not found in reader", "WARNING")
             return
-        master_fd = sess["master_fd"]
+        
+        stdout = sess.get("stdout")
         proc = sess.get("process")
-        pid = sess.get("pid")
-        self.log(f"Starting reader for session {session_id}, master_fd={master_fd}", "DEBUG")
+        
+        if not stdout:
+            self.log(f"Session {session_id} has no stdout", "WARNING")
+            return
+            
+        self.log(f"Starting reader for session {session_id}", "DEBUG")
         try:
             while True:
                 try:
                     # Read using executor to avoid blocking event loop
-                    data = await loop.run_in_executor(None, _os.read, master_fd, 4096)
+                    data = await loop.run_in_executor(None, stdout.read, 1024)
                     if not data:
                         self.log(f"Session {session_id} reader got EOF", "DEBUG")
                         break
-                except OSError as ose:
-                    # Handle common PTY read errors gracefully
-                    if ose.errno in (_errno.EIO, _errno.EBADF, _errno.EINVAL):
-                        self.log(f"Session {session_id} PTY closed (errno={ose.errno})", "DEBUG")
-                        break
-                    raise
+                except Exception as e:
+                    self.log(f"Session {session_id} read error: {e}", "DEBUG")
+                    break
+                    
                 try:
                     output = data.decode('utf-8', errors='replace')
                 except Exception:
                     output = str(data)
+                    
                 self.log(f"Session {session_id} read {len(data)} bytes", "DEBUG")
+                
                 # Send shell_output message
                 if self.ws:
                     try:
@@ -2025,116 +1945,67 @@ class MicroHackAgent:
                         })
                         await self.ws.send(msg)
                     except Exception as e:
-                        self.log(f"Failed to send shell_output for session {session_id}: {e}", "WARNING")
-                        # If websocket is gone, stop the reader
+                        self.log(f"Failed to send shell_output: {e}", "WARNING")
                         if not self.ws:
                             break
-                # If process exited, break
-                if proc is not None:
-                    if proc.poll() is not None:
-                        break
-                elif pid:
-                    try:
-                        # Non-blocking check if child has exited
-                        finished_pid, status = os.waitpid(pid, os.WNOHANG)
-                        if finished_pid == pid:
-                            break
-                    except ChildProcessError:
-                        # No child process or already reaped
-                        break
+                            
+                # Check if process exited
+                if proc and proc.poll() is not None:
+                    break
+                    
         except Exception as e:
             self.log(f"Session reader error for {session_id}: {e}", "WARNING")
         finally:
             self.log(f"Session {session_id} reader exiting, cleaning up", "DEBUG")
-            try:
-                _os.close(master_fd)
-            except Exception:
-                pass
-            # Clean up session from tracking
+            # Clean up session
             if session_id in self.shell_sessions:
                 del self.shell_sessions[session_id]
             if session_id in self._session_tasks:
                 del self._session_tasks[session_id]
 
     async def write_shell_input(self, session_id: str, input_str: str) -> tuple[bool, str]:
-        """Write input to the PTY master for a given session.
-
-        Returns (ok, message)
-        """
-        import os as _os
+        """Write input to stdin for a given session."""
         sess = self.shell_sessions.get(session_id)
         if not sess:
-            self.log(f'write_shell_input: Session {session_id} not found. Active sessions: {list(self.shell_sessions.keys())}', 'WARNING')
+            self.log(f'write_shell_input: Session {session_id} not found', 'WARNING')
             return False, "Session not found"
-        master_fd = sess.get('master_fd')
-        if not master_fd:
-            return False, "Invalid session"
+        
+        stdin = sess.get('stdin')
+        if not stdin:
+            return False, "Invalid session - no stdin"
+            
         try:
             if isinstance(input_str, str):
                 data = input_str.encode('utf-8')
             else:
                 data = bytes(input_str)
-            # Ensure newline at end if not present? Keep as is - caller handles
-            _os.write(master_fd, data)
+            stdin.write(data)
+            stdin.flush()
             self.log(f'Wrote to shell session {session_id}: {input_str!r}', 'DEBUG')
             return True, ""
         except Exception as e:
             return False, str(e)
 
     async def resize_shell_session(self, session_id: str, rows: int, cols: int) -> tuple[bool, str]:
-        """Resize a PTY session's window size (rows x cols) using ioctl."""
-        import fcntl as _fcntl
-        import termios as _termios
-        import struct as _struct
-        import os as _os
-
-        sess = self.shell_sessions.get(session_id)
-        if not sess:
-            return False, "Session not found"
-        master_fd = sess.get('master_fd')
-        if not master_fd:
-            return False, "Invalid session"
-
-        try:
-            # Build winsize struct: rows, cols, xpixels, ypixels
-            winsize = _struct.pack('HHHH', int(rows), int(cols), 0, 0)
-            _fcntl.ioctl(master_fd, _termios.TIOCSWINSZ, winsize)
-            return True, ""
-        except Exception as e:
-            return False, str(e)
+        """Resize not supported for simple pipe shell."""
+        # No-op for pipe-based shells
+        return True, ""
 
     async def stop_shell_session(self, session_id: str) -> tuple[bool, str]:
-        """Stop a shell PTY session and clean up resources."""
-        import os as _os
+        """Stop a shell session and clean up resources."""
         sess = self.shell_sessions.get(session_id)
         if not sess:
             return False, "Session not found"
+            
         proc = sess.get('process')
-        pid = sess.get('pid')
-        master_fd = sess.get('master_fd')
-        slave_fd = sess.get('slave_fd')
         try:
             if proc and proc.poll() is None:
                 proc.terminate()
-            elif pid:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except Exception:
-                    pass
-                # give it a moment, then kill if still alive
                 await asyncio.sleep(0.2)
-                if proc and proc.poll() is None:
+                if proc.poll() is None:
                     proc.kill()
-                elif pid:
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                        try:
-                            os.waitpid(pid, 0)
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-            # cancel reader task
+                    
+            # Cancel reader task
             task = self._session_tasks.pop(session_id, None)
             if task:
                 task.cancel()
@@ -2142,16 +2013,25 @@ class MicroHackAgent:
                     await task
                 except asyncio.CancelledError:
                     pass
-            try:
-                _os.close(master_fd)
-            except Exception:
-                pass
-            try:
-                _os.close(slave_fd)
-            except Exception:
-                pass
-            self.shell_sessions.pop(session_id, None)
-            self.log(f"Stopped shell session {session_id}")
+                    
+            # Close streams
+            stdin = sess.get('stdin')
+            stdout = sess.get('stdout')
+            if stdin:
+                try:
+                    stdin.close()
+                except:
+                    pass
+            if stdout:
+                try:
+                    stdout.close()
+                except:
+                    pass
+                    
+            # Remove session
+            if session_id in self.shell_sessions:
+                del self.shell_sessions[session_id]
+                
             return True, ""
         except Exception as e:
             return False, str(e)
