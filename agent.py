@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.4"
+VERSION = "1.10.5"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -2035,6 +2035,7 @@ class MicroHackAgent:
         import os as _os
         sess = self.shell_sessions.get(session_id)
         if not sess:
+            self.log(f'write_shell_input: Session {session_id} not found. Active sessions: {list(self.shell_sessions.keys())}', 'WARNING')
             return False, "Session not found"
         master_fd = sess.get('master_fd')
         if not master_fd:
@@ -5650,11 +5651,14 @@ apt-get install -y speedtest
             elif command == "shell_start":
                 # Start a new PTY-based shell session and stream output
                 cmd = command_data.get('command') or '/bin/sh'
+                self.log(f"shell_start request: command={cmd}, current sessions={list(self.shell_sessions.keys())}")
                 response = await self.start_shell_session(command_id, cmd)
+                self.log(f"shell_start response: session_id={response.get('data', {}).get('session_id')}, sessions now={list(self.shell_sessions.keys())}")
             elif command == "shell_input":
                 # Write input to an existing session (fire and forget)
                 session_id = command_data.get('session_id')
                 inp = command_data.get('input', '')
+                self.log(f"shell_input request: session_id={session_id}, active_sessions={list(self.shell_sessions.keys())}", "DEBUG")
                 ok, msg = await self.write_shell_input(session_id, inp)
                 response = {
                     "type": "response",
