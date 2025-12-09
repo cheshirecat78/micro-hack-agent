@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.14"
+VERSION = "1.10.15"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -1872,13 +1872,32 @@ class MicroHackAgent:
             except Exception as e:
                 self.log(f"Could not set terminal size: {e}", "DEBUG")
             
-            # Set up environment
+            # Set up environment for full interactive shell
             env = os.environ.copy()
             env['TERM'] = 'xterm-256color'
+            env['COLORTERM'] = 'truecolor'
+            env['LANG'] = env.get('LANG', 'en_US.UTF-8')
+            env['LC_ALL'] = env.get('LC_ALL', env.get('LANG', 'en_US.UTF-8'))
+            # Ensure HOME is set for bash to load .bashrc
+            if 'HOME' not in env:
+                import pwd
+                try:
+                    env['HOME'] = pwd.getpwuid(_os.getuid()).pw_dir
+                except Exception:
+                    env['HOME'] = '/root' if _os.getuid() == 0 else '/tmp'
+            
+            # Use login shell for proper initialization (tab completion, aliases, etc.)
+            # Wrap command to start as interactive login shell
+            if command in ('/bin/bash', 'bash'):
+                shell_cmd = '/bin/bash --login -i'
+            elif command in ('/bin/sh', 'sh'):
+                shell_cmd = command
+            else:
+                shell_cmd = command
             
             # Start shell with PTY
             proc = subprocess.Popen(
-                command,
+                shell_cmd,
                 shell=True,
                 stdin=slave_fd,
                 stdout=slave_fd,
