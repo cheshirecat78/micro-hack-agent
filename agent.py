@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.7"
+VERSION = "1.10.9"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -1873,17 +1873,12 @@ class MicroHackAgent:
             args = [command]
 
         try:
-            # Prefer pty.fork() on POSIX systems. This ensures the child has a
-            # proper controlling terminal so shells get job control. If pty.fork
-            # is unavailable (e.g., Windows), fall back to openpty + subprocess.
+            # Use openpty + subprocess approach for all platforms.
+            # pty.fork() can cause issues with the asyncio event loop and 
+            # has been observed to crash agents on both Android/Termux and Debian.
+            # The openpty approach is more reliable with subprocess management.
             use_fork = False
-            try:
-                import pty as _pty
-                # Only attempt fork on POSIX platforms
-                if os.name == 'posix':
-                    use_fork = True
-            except Exception:
-                use_fork = False
+            self.log("Using openpty + subprocess for PTY spawn", "DEBUG")
 
             if use_fork:
                 self.log("Using pty.fork() for PTY spawn (POSIX)", "DEBUG")
@@ -1997,6 +1992,7 @@ class MicroHackAgent:
         """Read from the PTY master and send shell_output messages to the server as data arrives."""
         import os as _os
         import json as _json
+        import errno as _errno
         loop = asyncio.get_event_loop()
         sess = self.shell_sessions.get(session_id)
         if not sess:
@@ -2008,11 +2004,18 @@ class MicroHackAgent:
         self.log(f"Starting reader for session {session_id}, master_fd={master_fd}", "DEBUG")
         try:
             while True:
-                # Read using executor to avoid blocking event loop
-                data = await loop.run_in_executor(None, _os.read, master_fd, 4096)
-                if not data:
-                    self.log(f"Session {session_id} reader got EOF", "DEBUG")
-                    break
+                try:
+                    # Read using executor to avoid blocking event loop
+                    data = await loop.run_in_executor(None, _os.read, master_fd, 4096)
+                    if not data:
+                        self.log(f"Session {session_id} reader got EOF", "DEBUG")
+                        break
+                except OSError as ose:
+                    # Handle common PTY read errors gracefully
+                    if ose.errno in (_errno.EIO, _errno.EBADF, _errno.EINVAL):
+                        self.log(f"Session {session_id} PTY closed (errno={ose.errno})", "DEBUG")
+                        break
+                    raise
                 try:
                     output = data.decode('utf-8', errors='replace')
                 except Exception:
@@ -2031,6 +2034,9 @@ class MicroHackAgent:
                         await self.ws.send(msg)
                     except Exception as e:
                         self.log(f"Failed to send shell_output for session {session_id}: {e}", "WARNING")
+                        # If websocket is gone, stop the reader
+                        if not self.ws:
+                            break
                 # If process exited, break
                 if proc is not None:
                     if proc.poll() is not None:
@@ -2047,10 +2053,16 @@ class MicroHackAgent:
         except Exception as e:
             self.log(f"Session reader error for {session_id}: {e}", "WARNING")
         finally:
+            self.log(f"Session {session_id} reader exiting, cleaning up", "DEBUG")
             try:
                 _os.close(master_fd)
             except Exception:
                 pass
+            # Clean up session from tracking
+            if session_id in self.shell_sessions:
+                del self.shell_sessions[session_id]
+            if session_id in self._session_tasks:
+                del self._session_tasks[session_id]
 
     async def write_shell_input(self, session_id: str, input_str: str) -> tuple[bool, str]:
         """Write input to the PTY master for a given session.
