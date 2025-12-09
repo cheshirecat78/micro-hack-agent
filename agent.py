@@ -2028,6 +2028,34 @@ class MicroHackAgent:
         except Exception as e:
             self.log(f"Failed to send job progress: {e}", "WARNING")
 
+    async def send_job_accepted(self, job_id: str, command_id: str, command: str, queue_position: int = 0, is_priority: bool = False):
+        """Send immediate job acceptance acknowledgment to unblock the UI.
+        
+        This is sent as soon as a command is received, before it's processed,
+        letting the UI know the agent has accepted the job and queued it.
+        """
+        if not self.ws:
+            return
+        
+        accepted_msg = {
+            "type": "job_accepted",
+            "job_id": job_id,
+            "command_id": command_id,
+            "command": command,
+            "queue_position": queue_position,
+            "is_priority": is_priority,
+            "agent_id": self.agent_id,
+            "regular_queue_size": self._command_queue.qsize() if self._command_queue else 0,
+            "priority_queue_size": self._priority_queue.qsize() if self._priority_queue else 0,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        try:
+            await self.ws.send(json.dumps(accepted_msg))
+            self.log(f"Job accepted: {command} (pos={queue_position}, priority={is_priority})", "DEBUG")
+        except Exception as e:
+            self.log(f"Failed to send job accepted: {e}", "WARNING")
+
     async def send_job_output(self, job_id: str, output_line: str):
         """Send a single command output line back to server for live UI streaming"""
         if not self.ws or not job_id or not output_line:
@@ -2442,9 +2470,27 @@ class MicroHackAgent:
             pass  # Silent acknowledgment
         
         elif msg_type == "command":
-            # Route to priority queue for fast commands, regular queue for scans
+            # Immediately acknowledge job acceptance - unblocks the UI
             command = data.get("command", "")
-            if command in self._fast_commands:
+            command_id = data.get("command_id")
+            job_id = data.get("data", {}).get("job_id")
+            
+            # Determine which queue and get queue position
+            is_priority = command in self._fast_commands
+            target_queue = self._priority_queue if is_priority else self._command_queue
+            queue_position = target_queue.qsize() if target_queue else 0
+            
+            # Send immediate acceptance acknowledgment
+            await self.send_job_accepted(
+                job_id=job_id,
+                command_id=command_id,
+                command=command,
+                queue_position=queue_position,
+                is_priority=is_priority
+            )
+            
+            # Route to appropriate queue
+            if is_priority:
                 # Fast commands go to priority queue for immediate handling
                 if self._priority_queue:
                     await self._priority_queue.put(data)
