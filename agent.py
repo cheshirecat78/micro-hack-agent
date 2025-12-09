@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.17"
+VERSION = "1.10.18"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -4322,28 +4322,74 @@ class MicroHackAgent:
             response["data"]["auto_installed"] = "dig"
         
         try:
+            # Run dig with full output to parse answers, authority, and additional sections
             process = await asyncio.create_subprocess_exec(
-                "dig", f"@{dns_server}", target, query_type, "+noall", "+answer",
+                "dig", f"@{dns_server}", target, query_type,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
             
             output = stdout.decode().strip()
-            records = [line for line in output.split('\n') if line.strip()]
+            
+            # Parse dig output into structured sections
+            answers = []
+            authority = []
+            additional = []
+            status = "NOERROR"
+            query_time_ms = None
+            
+            current_section = None
+            for line in output.split('\n'):
+                line = line.strip()
+                if not line or line.startswith(';;'):
+                    # Check for section headers and status
+                    if 'ANSWER SECTION' in line:
+                        current_section = 'answer'
+                    elif 'AUTHORITY SECTION' in line:
+                        current_section = 'authority'
+                    elif 'ADDITIONAL SECTION' in line:
+                        current_section = 'additional'
+                    elif 'status:' in line:
+                        # Extract status like "status: NXDOMAIN"
+                        import re
+                        match = re.search(r'status:\s*(\w+)', line)
+                        if match:
+                            status = match.group(1)
+                    elif 'Query time:' in line:
+                        # Extract query time like "Query time: 23 msec"
+                        import re
+                        match = re.search(r'Query time:\s*(\d+)', line)
+                        if match:
+                            query_time_ms = int(match.group(1))
+                    continue
+                
+                # Parse record lines (not comments)
+                if current_section == 'answer' and line and not line.startswith(';'):
+                    answers.append(line)
+                elif current_section == 'authority' and line and not line.startswith(';'):
+                    authority.append(line)
+                elif current_section == 'additional' and line and not line.startswith(';'):
+                    additional.append(line)
             
             response["data"] = {
                 "target": target,
                 "query_type": query_type,
                 "dns_server": dns_server,
-                "records": records,
+                "answers": answers,
+                "authority": authority,
+                "additional": additional,
+                "status": status,
+                "query_time_ms": query_time_ms,
+                "success": status == "NOERROR" and len(answers) > 0,
                 "raw_output": output,
+                "records": answers,  # Keep for backwards compatibility
                 "agent_id": self.agent_id,
                 "agent_hostname": self.hostname,
                 "scanned_at": datetime.utcnow().isoformat()
             }
             
-            self.log(f"Dig lookup complete: {len(records)} records")
+            self.log(f"Dig lookup complete: {len(answers)} answers, status={status}")
             
         except asyncio.TimeoutError:
             response["success"] = False
