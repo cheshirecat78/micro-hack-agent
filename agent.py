@@ -2471,6 +2471,9 @@ class MicroHackAgent:
         - target: IP or hostname to ping
         - count: number of ping packets (optional, default: 10)
         """
+        job_id = command_data.get("job_id")
+        await self.send_job_progress(job_id, 10, "Starting ping...")
+        
         response = {
             "type": "response",
             "command_id": command_id,
@@ -2506,6 +2509,8 @@ class MicroHackAgent:
             cmd = ["ping", "-c", str(count), target]
         
         self.log(f"Running ping: {' '.join(cmd)}")
+        await self.send_job_progress(job_id, 30, f"Pinging {target}...")
+        await self.send_job_output(job_id, f"Sending {count} ping packets to {target}...")
         
         try:
             process = await asyncio.create_subprocess_exec(
@@ -2530,13 +2535,18 @@ class MicroHackAgent:
             result["agent_id"] = self.agent_id
             
             response["data"] = result
-            
+            await self.send_job_progress(job_id, 90, "Processing results...")
+
             if result.get("packet_loss", 100) < 100:
                 response["data"]["is_alive"] = True
                 self.log(f"Ping complete: {target} is reachable, avg latency {result.get('avg_latency', 'N/A')}ms")
+                await self.send_job_output(job_id, f"Host reachable: avg {result.get('avg_latency', 'N/A')}ms, {result.get('packet_loss', 0)}% loss")
             else:
                 response["data"]["is_alive"] = False
                 self.log(f"Ping complete: {target} is not reachable")
+                await self.send_job_output(job_id, f"Host not reachable: 100% packet loss")
+            
+            await self.send_job_progress(job_id, 100, "Ping complete")
             
         except asyncio.TimeoutError:
             response["success"] = False
@@ -3280,7 +3290,10 @@ class MicroHackAgent:
             response["error"] = "No target specified"
             return response
         
+        job_id = command_data.get("job_id")
+        
         # Check if sslscan is installed, auto-install if needed
+        await self.send_job_progress(job_id, 5, "Checking sslscan installation...")
         installed, install_msg = await self.ensure_tool_installed("sslscan")
         if not installed:
             response["success"] = False
@@ -3288,6 +3301,7 @@ class MicroHackAgent:
             return response
         if install_msg == "installed":
             response["data"]["auto_installed"] = "sslscan"
+            await self.send_job_output(job_id, "Auto-installed sslscan")
         
         # Get options
         port = command_data.get("port", 443)
@@ -3298,6 +3312,8 @@ class MicroHackAgent:
         cmd = ["sslscan", "--xml=-", target_with_port]
         
         self.log(f"Running sslscan: {' '.join(cmd)}")
+        await self.send_job_progress(job_id, 10, f"Starting SSL scan on {target}:{port}")
+        await self.send_job_output(job_id, f"$ {' '.join(cmd)}")
         
         try:
             process = await asyncio.create_subprocess_exec(
@@ -3306,15 +3322,21 @@ class MicroHackAgent:
                 stderr=asyncio.subprocess.PIPE
             )
             
+            await self.send_job_progress(job_id, 30, "Scanning SSL/TLS protocols and ciphers...")
+            
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
                 timeout=120  # 2 minute timeout for sslscan
             )
             
+            await self.send_job_progress(job_id, 70, "Parsing scan results...")
+            
             xml_output = stdout.decode("utf-8", errors="replace")
             
             # Parse XML output
             ssl_info = self.parse_sslscan_xml(xml_output)
+            
+            await self.send_job_progress(job_id, 90, "Building response...")
             
             response["data"] = {
                 "target": target,
@@ -3326,15 +3348,28 @@ class MicroHackAgent:
                 "agent_hostname": self.hostname
             }
             
+            # Output summary info
+            if ssl_info.get("protocols"):
+                enabled = [p for p in ssl_info["protocols"] if p.get("enabled")]
+                await self.send_job_output(job_id, f"Found {len(enabled)} enabled protocols")
+            if ssl_info.get("ciphers"):
+                await self.send_job_output(job_id, f"Found {len(ssl_info['ciphers'])} ciphers")
+            if ssl_info.get("vulnerabilities"):
+                for vuln in ssl_info["vulnerabilities"]:
+                    await self.send_job_output(job_id, f"⚠️ Vulnerability: {vuln}")
+            
+            await self.send_job_progress(job_id, 100, "SSLscan complete")
             self.log(f"SSLscan complete")
             
         except asyncio.TimeoutError:
             response["success"] = False
             response["error"] = "SSLscan timed out (2 minute limit)"
+            await self.send_job_output(job_id, "ERROR: SSLscan timed out")
             self.log("SSLscan timed out", "ERROR")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"SSLscan error: {e}", "ERROR")
         
         return response
@@ -3565,7 +3600,10 @@ class MicroHackAgent:
             response["error"] = "No target specified"
             return response
         
+        job_id = command_data.get("job_id")
+        
         # Check if whatweb is installed, auto-install if needed
+        await self.send_job_progress(job_id, 5, "Checking whatweb installation...")
         installed, install_msg = await self.ensure_tool_installed("whatweb")
         if not installed:
             response["success"] = False
@@ -3573,6 +3611,7 @@ class MicroHackAgent:
             return response
         if install_msg == "installed":
             response["data"]["auto_installed"] = "whatweb"
+            await self.send_job_output(job_id, "Auto-installed whatweb")
         
         # Ensure URL has scheme
         if not target.startswith(("http://", "https://")):
@@ -3586,6 +3625,8 @@ class MicroHackAgent:
         cmd = ["whatweb", "-a", str(aggression), "--log-json=-", target]
         
         self.log(f"Running whatweb scan: {' '.join(cmd)}")
+        await self.send_job_progress(job_id, 10, f"Starting WhatWeb scan on {target}")
+        await self.send_job_output(job_id, f"$ {' '.join(cmd)}")
         
         try:
             process = await asyncio.create_subprocess_exec(
@@ -3594,10 +3635,14 @@ class MicroHackAgent:
                 stderr=asyncio.subprocess.PIPE
             )
             
+            await self.send_job_progress(job_id, 30, "Fingerprinting web technologies...")
+            
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
                 timeout=240  # 4 minute timeout for complex sites
             )
+            
+            await self.send_job_progress(job_id, 70, "Parsing results...")
             
             output = stdout.decode("utf-8", errors="replace")
             
@@ -3613,8 +3658,12 @@ class MicroHackAgent:
                                 if isinstance(info, dict):
                                     tech["version"] = info.get("version", [None])[0] if info.get("version") else None
                                 technologies.append(tech)
+                                await self.send_job_output(job_id, f"Found: {plugin}" + (f" v{tech['version']}" if tech.get('version') else ""))
             except json.JSONDecodeError:
                 technologies = [{"raw_output": output}]
+                await self.send_job_output(job_id, "Warning: Could not parse JSON output")
+            
+            await self.send_job_progress(job_id, 90, "Building response...")
             
             response["data"] = {
                 "target": target,
@@ -3626,15 +3675,18 @@ class MicroHackAgent:
                 "agent_hostname": self.hostname
             }
             
+            await self.send_job_progress(job_id, 100, f"WhatWeb complete: {len(technologies)} technologies")
             self.log(f"WhatWeb scan complete: found {len(technologies)} technologies")
             
         except asyncio.TimeoutError:
             response["success"] = False
             response["error"] = "WhatWeb scan timed out (4 minute limit)"
+            await self.send_job_output(job_id, "ERROR: WhatWeb scan timed out")
             self.log("WhatWeb scan timed out", "ERROR")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"WhatWeb error: {e}", "ERROR")
         
         return response
@@ -3789,18 +3841,27 @@ class MicroHackAgent:
             return response
         
         project_id = command_data.get("project_id")
+        job_id = command_data.get("job_id")
+        
+        await self.send_job_progress(job_id, 10, f"Connecting to SSH on {target}:{port}")
         
         # Try to connect and get SSH banner/info using socket
         import socket
         
         try:
+            await self.send_job_output(job_id, f"Connecting to {target}:{port}...")
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
             sock.connect((target, int(port)))
             
+            await self.send_job_progress(job_id, 50, "Reading SSH banner...")
+            
             # Get banner
             banner = sock.recv(1024).decode('utf-8', errors='replace').strip()
             sock.close()
+            
+            await self.send_job_output(job_id, f"Banner: {banner}")
+            await self.send_job_progress(job_id, 80, "Parsing banner...")
             
             # Parse banner for version info
             ssh_version = None
@@ -3824,17 +3885,21 @@ class MicroHackAgent:
                 "agent_hostname": self.hostname
             }
             
+            await self.send_job_progress(job_id, 100, "SSH audit complete")
             self.log(f"SSH audit complete: {banner}")
             
         except socket.timeout:
             response["success"] = False
             response["error"] = "Connection timed out"
+            await self.send_job_output(job_id, "ERROR: Connection timed out")
         except ConnectionRefusedError:
             response["success"] = False
             response["error"] = "Connection refused - SSH port may be closed"
+            await self.send_job_output(job_id, "ERROR: Connection refused")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"SSH audit error: {e}", "ERROR")
         
         return response
@@ -3856,29 +3921,42 @@ class MicroHackAgent:
             return response
         
         project_id = command_data.get("project_id")
+        job_id = command_data.get("job_id")
         
         import socket
         
+        await self.send_job_progress(job_id, 10, f"Connecting to FTP on {target}:{port}")
+        
         try:
+            await self.send_job_output(job_id, f"Connecting to {target}:{port}...")
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
             sock.connect((target, int(port)))
             
+            await self.send_job_progress(job_id, 30, "Reading FTP banner...")
+            
             # Get banner
             banner = sock.recv(1024).decode('utf-8', errors='replace').strip()
+            await self.send_job_output(job_id, f"Banner: {banner}")
+            
+            await self.send_job_progress(job_id, 50, "Testing anonymous login...")
             
             # Try anonymous login
             sock.send(b"USER anonymous\r\n")
             user_response = sock.recv(1024).decode('utf-8', errors='replace').strip()
+            await self.send_job_output(job_id, f"USER response: {user_response}")
             
             anonymous_allowed = False
             if "331" in user_response:  # 331 = password required
                 sock.send(b"PASS anonymous@\r\n")
                 pass_response = sock.recv(1024).decode('utf-8', errors='replace').strip()
                 anonymous_allowed = "230" in pass_response  # 230 = login successful
+                await self.send_job_output(job_id, f"PASS response: {pass_response}")
             
             sock.send(b"QUIT\r\n")
             sock.close()
+            
+            await self.send_job_progress(job_id, 90, "Building response...")
             
             response["data"] = {
                 "target": target,
@@ -3891,18 +3969,26 @@ class MicroHackAgent:
                 "agent_hostname": self.hostname
             }
             
+            status = "⚠️ ALLOWED" if anonymous_allowed else "✓ denied"
+            await self.send_job_output(job_id, f"Anonymous login: {status}")
+            await self.send_job_progress(job_id, 100, f"FTP check complete: anonymous {'allowed' if anonymous_allowed else 'denied'}")
             self.log(f"FTP anonymous check complete: anonymous={'allowed' if anonymous_allowed else 'denied'}")
             
         except socket.timeout:
             response["success"] = False
             response["error"] = "Connection timed out"
+            await self.send_job_output(job_id, "ERROR: Connection timed out")
         except ConnectionRefusedError:
             response["success"] = False
             response["error"] = "Connection refused - FTP port may be closed"
+            await self.send_job_output(job_id, "ERROR: Connection refused")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"FTP anon check error: {e}", "ERROR")
+        
+        return response
         
         return response
     
@@ -3923,16 +4009,25 @@ class MicroHackAgent:
             return response
         
         project_id = command_data.get("project_id")
+        job_id = command_data.get("job_id")
         
         import socket
         
+        await self.send_job_progress(job_id, 10, f"Connecting to SMTP on {target}:{port}")
+        
         try:
+            await self.send_job_output(job_id, f"Connecting to {target}:{port}...")
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
             sock.connect((target, int(port)))
             
+            await self.send_job_progress(job_id, 30, "Reading SMTP banner...")
+            
             # Get banner
             banner = sock.recv(1024).decode('utf-8', errors='replace').strip()
+            await self.send_job_output(job_id, f"Banner: {banner}")
+            
+            await self.send_job_progress(job_id, 50, "Sending EHLO to get capabilities...")
             
             # Send EHLO to get capabilities
             sock.send(b"EHLO test\r\n")
@@ -3946,9 +4041,12 @@ class MicroHackAgent:
                     cap = line[4:].strip()
                     if cap and cap.upper() != target.upper():
                         capabilities.append(cap)
+                        await self.send_job_output(job_id, f"Capability: {cap}")
             
             sock.send(b"QUIT\r\n")
             sock.close()
+            
+            await self.send_job_progress(job_id, 90, "Building response...")
             
             response["data"] = {
                 "target": target,
@@ -3962,17 +4060,23 @@ class MicroHackAgent:
                 "agent_hostname": self.hostname
             }
             
+            starttls = "✓" if response["data"]["supports_starttls"] else "✗"
+            await self.send_job_output(job_id, f"STARTTLS supported: {starttls}")
+            await self.send_job_progress(job_id, 100, f"SMTP scan complete: {len(capabilities)} capabilities")
             self.log(f"SMTP scan complete: {len(capabilities)} capabilities")
             
         except socket.timeout:
             response["success"] = False
             response["error"] = "Connection timed out"
+            await self.send_job_output(job_id, "ERROR: Connection timed out")
         except ConnectionRefusedError:
             response["success"] = False
             response["error"] = "Connection refused - SMTP port may be closed"
+            await self.send_job_output(job_id, "ERROR: Connection refused")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"SMTP scan error: {e}", "ERROR")
         
         return response
@@ -3994,16 +4098,25 @@ class MicroHackAgent:
             return response
         
         project_id = command_data.get("project_id")
+        job_id = command_data.get("job_id")
         
         import socket
         
+        await self.send_job_progress(job_id, 10, f"Connecting to IMAP on {target}:{port}")
+        
         try:
+            await self.send_job_output(job_id, f"Connecting to {target}:{port}...")
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
             sock.connect((target, int(port)))
             
+            await self.send_job_progress(job_id, 30, "Reading IMAP banner...")
+            
             # Get banner
             banner = sock.recv(1024).decode('utf-8', errors='replace').strip()
+            await self.send_job_output(job_id, f"Banner: {banner}")
+            
+            await self.send_job_progress(job_id, 50, "Requesting capabilities...")
             
             # Send CAPABILITY command
             sock.send(b"a001 CAPABILITY\r\n")
@@ -4018,9 +4131,12 @@ class MicroHackAgent:
                         part = part.strip()
                         if part and part.upper() not in ['*', 'CAPABILITY', 'A001', 'OK']:
                             capabilities.append(part)
+                            await self.send_job_output(job_id, f"Capability: {part}")
             
             sock.send(b"a002 LOGOUT\r\n")
             sock.close()
+            
+            await self.send_job_progress(job_id, 90, "Building response...")
             
             response["data"] = {
                 "target": target,
@@ -4034,17 +4150,23 @@ class MicroHackAgent:
                 "agent_hostname": self.hostname
             }
             
+            starttls = "✓" if response["data"]["supports_starttls"] else "✗"
+            await self.send_job_output(job_id, f"STARTTLS supported: {starttls}")
+            await self.send_job_progress(job_id, 100, f"IMAP scan complete: {len(capabilities)} capabilities")
             self.log(f"IMAP scan complete: {len(capabilities)} capabilities")
             
         except socket.timeout:
             response["success"] = False
             response["error"] = "Connection timed out"
+            await self.send_job_output(job_id, "ERROR: Connection timed out")
         except ConnectionRefusedError:
             response["success"] = False
             response["error"] = "Connection refused - IMAP port may be closed"
+            await self.send_job_output(job_id, "ERROR: Connection refused")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"IMAP scan error: {e}", "ERROR")
         
         return response
@@ -4066,13 +4188,19 @@ class MicroHackAgent:
             return response
         
         project_id = command_data.get("project_id")
+        job_id = command_data.get("job_id")
         
         import socket
         
+        await self.send_job_progress(job_id, 10, f"Connecting to {target}:{port}")
+        
         try:
+            await self.send_job_output(job_id, f"Connecting to {target}:{port}...")
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
             sock.connect((target, int(port)))
+            
+            await self.send_job_progress(job_id, 30, "Waiting for banner...")
             
             # Try to get banner (some services send on connect)
             banner = ""
@@ -4087,6 +4215,8 @@ class MicroHackAgent:
             
             # If no banner, try sending probe data
             if not banner:
+                await self.send_job_progress(job_id, 50, "No initial banner, sending probe...")
+                await self.send_job_output(job_id, "No initial banner, sending probe data...")
                 sock.setblocking(True)
                 sock.settimeout(5)
                 # Send HTTP probe for common ports
@@ -4101,6 +4231,16 @@ class MicroHackAgent:
             
             sock.close()
             
+            await self.send_job_progress(job_id, 80, "Building response...")
+            
+            if banner:
+                await self.send_job_output(job_id, f"Banner ({len(banner)} bytes):")
+                # Output first few lines of banner
+                for line in banner.split('\n')[:5]:
+                    await self.send_job_output(job_id, f"  {line.strip()}")
+            else:
+                await self.send_job_output(job_id, "No banner received")
+            
             response["data"] = {
                 "target": target,
                 "port": port,
@@ -4111,17 +4251,21 @@ class MicroHackAgent:
                 "agent_hostname": self.hostname
             }
             
+            await self.send_job_progress(job_id, 100, f"Banner grab complete: {len(banner)} bytes")
             self.log(f"Banner grab complete: {len(banner)} bytes")
             
         except socket.timeout:
             response["success"] = False
             response["error"] = "Connection timed out"
+            await self.send_job_output(job_id, "ERROR: Connection timed out")
         except ConnectionRefusedError:
             response["success"] = False
             response["error"] = f"Connection refused - port {port} may be closed"
+            await self.send_job_output(job_id, f"ERROR: Connection refused - port {port} may be closed")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"Banner grab error: {e}", "ERROR")
         
         return response
@@ -4143,6 +4287,7 @@ class MicroHackAgent:
             return response
         
         project_id = command_data.get("project_id")
+        job_id = command_data.get("job_id")
         
         # Determine URL
         if not target.startswith(("http://", "https://")):
@@ -4150,6 +4295,8 @@ class MicroHackAgent:
             url = f"{scheme}://{target}:{port}" if port not in [80, 443] else f"{scheme}://{target}"
         else:
             url = target
+        
+        await self.send_job_progress(job_id, 5, "Checking browser availability...")
         
         # Check for chromium/chrome, auto-install if needed
         browser = None
@@ -4159,6 +4306,7 @@ class MicroHackAgent:
                 break
         
         if not browser:
+            await self.send_job_output(job_id, "No browser found, attempting to install chromium...")
             # Try to auto-install chromium
             installed, install_msg = await self.ensure_tool_installed("chromium")
             if installed:
@@ -4169,11 +4317,16 @@ class MicroHackAgent:
                         break
                 if browser and install_msg == "installed":
                     response["data"]["auto_installed"] = "chromium"
+                    await self.send_job_output(job_id, "Auto-installed chromium")
         
         if not browser:
             response["success"] = False
             response["error"] = "No browser available (chromium/chrome required). Auto-install failed or requires root privileges."
+            await self.send_job_output(job_id, "ERROR: No browser available")
             return response
+        
+        await self.send_job_output(job_id, f"Using browser: {browser}")
+        await self.send_job_progress(job_id, 15, f"Starting screenshot of {url}")
         
         try:
             import tempfile
@@ -4196,6 +4349,7 @@ class MicroHackAgent:
             ]
             
             self.log(f"Taking screenshot: {url}")
+            await self.send_job_output(job_id, f"Loading page: {url}")
             
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -4203,11 +4357,16 @@ class MicroHackAgent:
                 stderr=asyncio.subprocess.PIPE
             )
             
+            await self.send_job_progress(job_id, 30, "Rendering page...")
+            
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)  # 90 seconds for slow sites
+            
+            await self.send_job_progress(job_id, 70, "Processing screenshot...")
             
             # Log chromium result for debugging
             if process.returncode != 0:
                 self.log(f"Chromium exited with code {process.returncode}, stderr: {stderr.decode('utf-8', errors='replace')[:500]}", "WARNING")
+                await self.send_job_output(job_id, f"Warning: Browser exited with code {process.returncode}")
             
             # Read and encode screenshot
             import os
@@ -4228,25 +4387,33 @@ class MicroHackAgent:
                 }
                 # Log size info for debugging large responses
                 response_size = len(json.dumps(response))
+                await self.send_job_output(job_id, f"Screenshot captured: {len(screenshot_data)} bytes")
+                await self.send_job_progress(job_id, 100, "Screenshot complete")
                 self.log(f"Screenshot complete: {len(screenshot_data)} bytes base64, response size: {response_size} bytes")
             else:
                 response["success"] = False
                 response["error"] = "Screenshot file was not created"
+                await self.send_job_output(job_id, "ERROR: Screenshot file was not created")
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
                     
         except asyncio.TimeoutError:
             response["success"] = False
             response["error"] = "Screenshot timed out"
+            await self.send_job_output(job_id, "ERROR: Screenshot timed out")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"Screenshot error: {e}", "ERROR")
         
         return response
     
     async def run_http_headers(self, command_id: str, command_data: dict) -> dict:
         """Get HTTP headers from a web server"""
+        job_id = command_data.get("job_id")
+        await self.send_job_progress(job_id, 10, "Starting HTTP header fetch...")
+        
         response = {
             "type": "response",
             "command_id": command_id,
@@ -4269,6 +4436,9 @@ class MicroHackAgent:
             url = f"{scheme}://{target}:{port}" if port not in [80, 443] else f"{scheme}://{target}"
         else:
             url = target
+        
+        await self.send_job_progress(job_id, 30, f"Fetching headers from {url}...")
+        await self.send_job_output(job_id, f"Sending HEAD request to {url}")
         
         try:
             import urllib.request
@@ -4300,6 +4470,8 @@ class MicroHackAgent:
             }
             
             self.log(f"HTTP headers complete: {len(headers)} headers")
+            await self.send_job_output(job_id, f"Received {len(headers)} headers, status {status_code}")
+            await self.send_job_progress(job_id, 100, "HTTP headers complete")
             
         except Exception as e:
             response["success"] = False
@@ -4310,6 +4482,9 @@ class MicroHackAgent:
     
     async def run_robots_fetch(self, command_id: str, command_data: dict) -> dict:
         """Fetch robots.txt from a web server"""
+        job_id = command_data.get("job_id")
+        await self.send_job_progress(job_id, 10, "Starting robots.txt fetch...")
+        
         response = {
             "type": "response",
             "command_id": command_id,
@@ -4334,6 +4509,8 @@ class MicroHackAgent:
             base_url = target.rstrip('/')
         
         robots_url = f"{base_url}/robots.txt"
+        await self.send_job_progress(job_id, 30, f"Fetching {robots_url}...")
+        await self.send_job_output(job_id, f"Requesting {robots_url}")
         
         try:
             import urllib.request
@@ -4386,6 +4563,8 @@ class MicroHackAgent:
             }
             
             self.log(f"Robots.txt fetch complete: {len(disallowed)} disallowed, {len(sitemaps)} sitemaps")
+            await self.send_job_output(job_id, f"Found {len(disallowed)} disallowed paths, {len(sitemaps)} sitemaps")
+            await self.send_job_progress(job_id, 100, "Robots.txt fetch complete")
             
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -4402,6 +4581,8 @@ class MicroHackAgent:
                     "scanned_at": datetime.utcnow().isoformat()
                 }
                 self.log("No robots.txt found (404)")
+                await self.send_job_output(job_id, "No robots.txt found (404)")
+                await self.send_job_progress(job_id, 100, "Robots.txt fetch complete (not found)")
             else:
                 response["success"] = False
                 response["error"] = f"HTTP error: {e.code}"
@@ -4423,11 +4604,14 @@ class MicroHackAgent:
         
         target = command_data.get("target")
         port = command_data.get("port", 53)
+        job_id = command_data.get("job_id")
         
         if not target:
             response["success"] = False
             response["error"] = "No target specified"
             return response
+        
+        await self.send_job_progress(job_id, 5, "Checking dig installation...")
         
         # Check if dig is available, auto-install if needed
         installed, install_msg = await self.ensure_tool_installed("dig")
@@ -4437,6 +4621,9 @@ class MicroHackAgent:
             return response
         if install_msg == "installed":
             response["data"]["auto_installed"] = "dig"
+            await self.send_job_output(job_id, "Auto-installed dig")
+        
+        await self.send_job_progress(job_id, 10, f"Starting DNS server scan on {target}:{port}")
         
         try:
             import re
@@ -4456,6 +4643,8 @@ class MicroHackAgent:
             test_domain = 'google.com'
             
             # Version Query (CHAOS)
+            await self.send_job_progress(job_id, 15, "Querying DNS server version...")
+            await self.send_job_output(job_id, "Testing: version.bind CHAOS query")
             try:
                 process = await asyncio.create_subprocess_exec(
                     "dig", f"@{target}", "-p", str(port), "version.bind", "TXT", "CHAOS", "+short",
@@ -4467,12 +4656,16 @@ class MicroHackAgent:
                 raw_outputs.append(f"=== Version Query ===\n{output}")
                 if output and not output.startswith(';') and 'connection refused' not in output.lower():
                     results['server_version'] = output
+                    await self.send_job_output(job_id, f"Server version: {output}")
             except asyncio.TimeoutError:
                 raw_outputs.append("Version query timed out")
+                await self.send_job_output(job_id, "Version query timed out")
             except Exception as e:
                 raw_outputs.append(f"Version query failed: {e}")
             
             # Hostname Query (CHAOS)
+            await self.send_job_progress(job_id, 25, "Querying DNS hostname...")
+            await self.send_job_output(job_id, "Testing: hostname.bind CHAOS query")
             try:
                 process = await asyncio.create_subprocess_exec(
                     "dig", f"@{target}", "-p", str(port), "hostname.bind", "TXT", "CHAOS", "+short",
@@ -4486,10 +4679,13 @@ class MicroHackAgent:
                     results['server_hostname'] = output
             except asyncio.TimeoutError:
                 raw_outputs.append("Hostname query timed out")
+                await self.send_job_output(job_id, "Hostname query timed out")
             except Exception as e:
                 raw_outputs.append(f"Hostname query failed: {e}")
             
             # Recursion Check (Open Resolver Test)
+            await self.send_job_progress(job_id, 40, "Testing recursion (open resolver)...")
+            await self.send_job_output(job_id, "Testing: recursion enabled check")
             try:
                 process = await asyncio.create_subprocess_exec(
                     "dig", f"@{target}", "-p", str(port), test_domain, "A", "+recurse", "+short",
@@ -4504,12 +4700,18 @@ class MicroHackAgent:
                     if ips:
                         results['recursion_enabled'] = True
                         results['recursion_test_result'] = f"Resolved {test_domain} to: {', '.join(ips)}"
+                        await self.send_job_output(job_id, f"⚠️ Recursion enabled: {', '.join(ips)}")
+                    else:
+                        await self.send_job_output(job_id, "✓ Recursion: not enabled")
             except asyncio.TimeoutError:
                 raw_outputs.append("Recursion test timed out")
+                await self.send_job_output(job_id, "Recursion test timed out")
             except Exception as e:
                 raw_outputs.append(f"Recursion test failed: {e}")
             
             # Cache Snooping
+            await self.send_job_progress(job_id, 55, "Testing cache snooping...")
+            await self.send_job_output(job_id, "Testing: cache snooping vulnerability")
             cached_domains = []
             domains_to_check = ['google.com', 'facebook.com', 'microsoft.com']
             for domain in domains_to_check:
@@ -4525,15 +4727,20 @@ class MicroHackAgent:
                         ips = re.findall(r'\d+\.\d+\.\d+\.\d+', output)
                         if ips:
                             cached_domains.append({'domain': domain, 'cached_ips': ips})
+                            await self.send_job_output(job_id, f"⚠️ Cached: {domain} -> {', '.join(ips)}")
                 except:
                     pass
             
             if cached_domains:
                 results['cache_snooping_possible'] = True
                 results['cached_domains'] = cached_domains
+            else:
+                await self.send_job_output(job_id, "✓ No cache snooping detected")
             raw_outputs.append(f"=== Cache Snooping ===\nCached: {len(cached_domains)} domains")
             
             # DNSSEC Check
+            await self.send_job_progress(job_id, 70, "Testing DNSSEC...")
+            await self.send_job_output(job_id, "Testing: DNSSEC support")
             try:
                 process = await asyncio.create_subprocess_exec(
                     "dig", f"@{target}", "-p", str(port), test_domain, "DNSKEY", "+short",
@@ -4544,11 +4751,16 @@ class MicroHackAgent:
                 output = stdout.decode().strip()
                 if output and not output.startswith(';'):
                     results['dnssec_enabled'] = True
+                    await self.send_job_output(job_id, "✓ DNSSEC: enabled")
+                else:
+                    await self.send_job_output(job_id, "DNSSEC: not enabled")
                 raw_outputs.append(f"=== DNSSEC ===\n{output[:200] if output else 'None'}")
             except:
                 pass
             
             # Amplification Test
+            await self.send_job_progress(job_id, 85, "Testing amplification factor...")
+            await self.send_job_output(job_id, "Testing: DNS amplification")
             try:
                 process = await asyncio.create_subprocess_exec(
                     "dig", f"@{target}", "-p", str(port), test_domain, "ANY", "+bufsize=4096",
@@ -4561,11 +4773,14 @@ class MicroHackAgent:
                     response_size = len(output)
                     request_size = 50
                     results['amplification_factor'] = round(response_size / request_size, 2)
+                    await self.send_job_output(job_id, f"Amplification factor: {results['amplification_factor']}x ({response_size} bytes)")
                 raw_outputs.append(f"=== Amplification ===\nResponse size: {len(output)} bytes")
             except:
                 pass
             
             results['raw_output'] = '\n\n'.join(raw_outputs)
+            
+            await self.send_job_progress(job_id, 95, "Building results...")
             
             response["data"] = {
                 "target": target,
@@ -4576,17 +4791,22 @@ class MicroHackAgent:
                 "scanned_at": datetime.utcnow().isoformat()
             }
             
+            await self.send_job_progress(job_id, 100, "DNS server scan complete")
             self.log(f"DNS server scan complete: recursion={results['recursion_enabled']}")
             
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"DNS server scan error: {e}", "ERROR")
         
         return response
     
     async def run_dig_lookup(self, command_id: str, command_data: dict) -> dict:
         """Perform dig DNS lookup (requires dig)"""
+        job_id = command_data.get("job_id")
+        await self.send_job_progress(job_id, 10, "Starting dig lookup...")
+        
         response = {
             "type": "response",
             "command_id": command_id,
@@ -4611,6 +4831,9 @@ class MicroHackAgent:
             return response
         if install_msg == "installed":
             response["data"]["auto_installed"] = "dig"
+        
+        await self.send_job_progress(job_id, 30, f"Running dig query for {target}...")
+        await self.send_job_output(job_id, f"dig @{dns_server} {target} {query_type}")
         
         try:
             # Run dig with full output to parse answers, authority, and additional sections
@@ -4681,10 +4904,13 @@ class MicroHackAgent:
             }
             
             self.log(f"Dig lookup complete: {len(answers)} answers, status={status}")
+            await self.send_job_output(job_id, f"Complete: {len(answers)} answers, status={status}")
+            await self.send_job_progress(job_id, 100, "Dig lookup complete")
             
         except asyncio.TimeoutError:
             response["success"] = False
             response["error"] = "Dig lookup timed out"
+            await self.send_job_output(job_id, "ERROR: Dig lookup timed out")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
@@ -4703,11 +4929,14 @@ class MicroHackAgent:
         
         target = command_data.get("target") or command_data.get("domain")
         host_id = command_data.get("host_id")
+        job_id = command_data.get("job_id")
         
         if not target:
             response["success"] = False
             response["error"] = "No target specified"
             return response
+        
+        await self.send_job_progress(job_id, 5, "Checking whois installation...")
         
         # Check if whois is available, auto-install if needed
         installed, install_msg = await self.ensure_tool_installed("whois")
@@ -4717,6 +4946,10 @@ class MicroHackAgent:
             return response
         if install_msg == "installed":
             response["data"]["auto_installed"] = "whois"
+            await self.send_job_output(job_id, "Auto-installed whois")
+        
+        await self.send_job_progress(job_id, 15, f"Looking up {target}...")
+        await self.send_job_output(job_id, f"$ whois {target}")
         
         try:
             # Run whois command
@@ -4726,6 +4959,8 @@ class MicroHackAgent:
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+            
+            await self.send_job_progress(job_id, 60, "Parsing WHOIS data...")
             
             output = stdout.decode('utf-8', errors='replace').strip()
             
@@ -4783,6 +5018,18 @@ class MicroHackAgent:
             whois_data["name_servers_str"] = ', '.join(whois_data["name_servers"])
             whois_data["emails_str"] = ', '.join(whois_data["emails"])
             
+            await self.send_job_progress(job_id, 90, "Building response...")
+            
+            # Output summary info
+            if whois_data["registrar"]:
+                await self.send_job_output(job_id, f"Registrar: {whois_data['registrar']}")
+            if whois_data["creation_date"]:
+                await self.send_job_output(job_id, f"Created: {whois_data['creation_date']}")
+            if whois_data["expiration_date"]:
+                await self.send_job_output(job_id, f"Expires: {whois_data['expiration_date']}")
+            if whois_data["name_servers"]:
+                await self.send_job_output(job_id, f"Name Servers: {len(whois_data['name_servers'])}")
+            
             response["data"] = {
                 "domain": target,
                 "host_id": host_id,
@@ -4798,20 +5045,26 @@ class MicroHackAgent:
                 "scanned_at": datetime.utcnow().isoformat()
             }
             
+            await self.send_job_progress(job_id, 100, "WHOIS lookup complete")
             self.log(f"WHOIS lookup complete: {target}")
             
         except asyncio.TimeoutError:
             response["success"] = False
             response["error"] = "WHOIS lookup timed out"
+            await self.send_job_output(job_id, "ERROR: WHOIS lookup timed out")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"WHOIS lookup error: {e}", "ERROR")
         
         return response
     
     async def run_ip_reputation(self, command_id: str, command_data: dict) -> dict:
         """Check IP reputation via DNS blacklists"""
+        job_id = command_data.get("job_id")
+        await self.send_job_progress(job_id, 10, "Starting IP reputation check...")
+        
         response = {
             "type": "response",
             "command_id": command_id,
@@ -4846,14 +5099,21 @@ class MicroHackAgent:
                 'spam.dnsbl.sorbs.net'
             ]
             
+            await self.send_job_output(job_id, f"Checking {len(dnsbls)} DNS blacklists for {target}...")
+            await self.send_job_progress(job_id, 30, "Querying DNS blacklists...")
+            
             listings = []
-            for dnsbl in dnsbls:
+            for i, dnsbl in enumerate(dnsbls):
                 query = f"{reversed_ip}.{dnsbl}"
                 try:
                     socket.gethostbyname(query)
                     listings.append(dnsbl)
+                    await self.send_job_output(job_id, f"Listed on {dnsbl}")
                 except socket.gaierror:
                     pass  # Not listed
+                # Update progress through DNSBL checks
+                progress = 30 + int((i + 1) / len(dnsbls) * 60)
+                await self.send_job_progress(job_id, progress, f"Checked {i + 1}/{len(dnsbls)} DNSBLs...")
             
             response["data"] = {
                 "target": target,
@@ -4867,6 +5127,8 @@ class MicroHackAgent:
             }
             
             self.log(f"IP reputation check complete: listed on {len(listings)} DNSBLs")
+            await self.send_job_output(job_id, f"Complete: listed on {len(listings)}/{len(dnsbls)} blacklists")
+            await self.send_job_progress(job_id, 100, "IP reputation check complete")
             
         except Exception as e:
             response["success"] = False
@@ -4877,6 +5139,9 @@ class MicroHackAgent:
     
     async def run_domain_reputation(self, command_id: str, command_data: dict) -> dict:
         """Check domain reputation"""
+        job_id = command_data.get("job_id")
+        await self.send_job_progress(job_id, 10, "Starting domain reputation check...")
+        
         response = {
             "type": "response",
             "command_id": command_id,
@@ -4907,6 +5172,8 @@ class MicroHackAgent:
             }
             
             # Check SPF record
+            await self.send_job_progress(job_id, 25, "Checking SPF record...")
+            await self.send_job_output(job_id, f"Checking SPF record for {target}...")
             try:
                 if shutil.which("dig"):
                     process = await asyncio.create_subprocess_exec(
@@ -4918,10 +5185,13 @@ class MicroHackAgent:
                     txt_records = stdout.decode().strip()
                     if 'v=spf1' in txt_records.lower():
                         results['has_spf'] = True
+                        await self.send_job_output(job_id, "SPF record found")
             except:
                 pass
             
             # Check DMARC record
+            await self.send_job_progress(job_id, 40, "Checking DMARC record...")
+            await self.send_job_output(job_id, f"Checking DMARC record for {target}...")
             try:
                 if shutil.which("dig"):
                     process = await asyncio.create_subprocess_exec(
@@ -4933,10 +5203,13 @@ class MicroHackAgent:
                     dmarc_record = stdout.decode().strip()
                     if 'v=dmarc1' in dmarc_record.lower():
                         results['has_dmarc'] = True
+                        await self.send_job_output(job_id, "DMARC record found")
             except:
                 pass
             
             # Get MX records
+            await self.send_job_progress(job_id, 60, "Getting MX records...")
+            await self.send_job_output(job_id, f"Getting MX records for {target}...")
             try:
                 if shutil.which("dig"):
                     process = await asyncio.create_subprocess_exec(
@@ -4947,10 +5220,14 @@ class MicroHackAgent:
                     stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
                     mx = [r.strip() for r in stdout.decode().strip().split('\n') if r.strip()]
                     results['mx_records'] = mx
+                    if mx:
+                        await self.send_job_output(job_id, f"Found {len(mx)} MX records")
             except:
                 pass
             
             # Get NS records
+            await self.send_job_progress(job_id, 80, "Getting NS records...")
+            await self.send_job_output(job_id, f"Getting NS records for {target}...")
             try:
                 if shutil.which("dig"):
                     process = await asyncio.create_subprocess_exec(
@@ -4961,6 +5238,8 @@ class MicroHackAgent:
                     stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
                     ns = [r.strip() for r in stdout.decode().strip().split('\n') if r.strip()]
                     results['ns_records'] = ns
+                    if ns:
+                        await self.send_job_output(job_id, f"Found {len(ns)} NS records")
             except:
                 pass
             
@@ -4985,6 +5264,8 @@ class MicroHackAgent:
             }
             
             self.log(f"Domain reputation check complete: score={score}")
+            await self.send_job_output(job_id, f"Reputation score: {min(score, 100)}/100")
+            await self.send_job_progress(job_id, 100, "Domain reputation check complete")
             
         except Exception as e:
             response["success"] = False
@@ -5001,6 +5282,10 @@ class MicroHackAgent:
             "success": True,
             "data": {}
         }
+        
+        job_id = command_data.get("job_id")
+        
+        await self.send_job_progress(job_id, 5, "Checking for speedtest tool...")
         
         try:
             # Priority order:
@@ -5025,6 +5310,7 @@ class MicroHackAgent:
                         speedtest_cmd = "speedtest"
                         use_ookla = True
                         self.log("Using official Ookla speedtest CLI (multi-threaded)")
+                        await self.send_job_output(job_id, "Using official Ookla speedtest (multi-threaded)")
                 except:
                     pass
             
@@ -5033,10 +5319,13 @@ class MicroHackAgent:
                 if shutil.which("speedtest-cli"):
                     speedtest_cmd = "speedtest-cli"
                     self.log("Using speedtest-cli (note: may cap around 100-200 Mbps for fast connections)")
+                    await self.send_job_output(job_id, "Using speedtest-cli (Python version)")
             
             # Try to install if nothing found
             if not speedtest_cmd:
                 self.log("No speedtest tool found, attempting to install...")
+                await self.send_job_output(job_id, "No speedtest tool found, attempting to install...")
+                await self.send_job_progress(job_id, 10, "Installing speedtest tool...")
                 
                 # Try to install official Ookla CLI first (Debian/Ubuntu)
                 if self._is_root():
@@ -5056,6 +5345,7 @@ apt-get install -y speedtest
                             speedtest_cmd = "speedtest"
                             use_ookla = True
                             response["data"]["auto_installed"] = "ookla-speedtest"
+                            await self.send_job_output(job_id, "Auto-installed Ookla speedtest")
                     except:
                         pass
                 
@@ -5071,29 +5361,39 @@ apt-get install -y speedtest
                         if shutil.which("speedtest-cli"):
                             speedtest_cmd = "speedtest-cli"
                             response["data"]["auto_installed"] = "speedtest-cli"
+                            await self.send_job_output(job_id, "Auto-installed speedtest-cli")
                     except:
                         pass
             
             if not speedtest_cmd:
                 response["success"] = False
                 response["error"] = "No speedtest tool available. For gigabit speeds, install official Ookla CLI: https://www.speedtest.net/apps/cli"
+                await self.send_job_output(job_id, "ERROR: No speedtest tool available")
                 return response
             
             self.log(f"Running speedtest using {speedtest_cmd}...")
+            await self.send_job_progress(job_id, 20, "Starting speedtest...")
+            await self.send_job_output(job_id, f"Running: {speedtest_cmd}")
             
             if use_ookla:
+                await self.send_job_progress(job_id, 30, "Testing latency...")
                 # Official Ookla CLI with JSON output and license acceptance
                 process = await asyncio.create_subprocess_exec(
                     speedtest_cmd, "--format=json", "--accept-license", "--accept-gdpr",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
+                
+                await self.send_job_progress(job_id, 50, "Testing download speed...")
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
                 
                 if process.returncode != 0:
                     response["success"] = False
                     response["error"] = f"Speedtest failed: {stderr.decode()}"
+                    await self.send_job_output(job_id, f"ERROR: {stderr.decode()}")
                     return response
+                
+                await self.send_job_progress(job_id, 80, "Processing results...")
                 
                 import json as json_module
                 result = json_module.loads(stdout.decode())
@@ -5101,6 +5401,10 @@ apt-get install -y speedtest
                 # Ookla CLI returns bandwidth in bytes/sec
                 download_bps = result.get("download", {}).get("bandwidth", 0) * 8  # Convert to bits
                 upload_bps = result.get("upload", {}).get("bandwidth", 0) * 8
+                
+                await self.send_job_output(job_id, f"Ping: {result.get('ping', {}).get('latency', 'N/A')} ms")
+                await self.send_job_output(job_id, f"Download: {round(download_bps / 1_000_000, 2)} Mbps")
+                await self.send_job_output(job_id, f"Upload: {round(upload_bps / 1_000_000, 2)} Mbps")
                 
                 response["data"] = {
                     "ping_ms": result.get("ping", {}).get("latency"),
@@ -5130,12 +5434,14 @@ apt-get install -y speedtest
                     "tested_at": datetime.utcnow().isoformat()
                 }
             else:
+                await self.send_job_progress(job_id, 30, "Testing speed (Python CLI)...")
                 # speedtest-cli (Python version)
                 process = await asyncio.create_subprocess_exec(
                     speedtest_cmd, "--json",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
+                await self.send_job_progress(job_id, 50, "Running download/upload tests...")
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
                 
                 if process.returncode != 0:
@@ -5205,14 +5511,18 @@ apt-get install -y speedtest
                         "tested_at": datetime.utcnow().isoformat()
                     }
             
+            await self.send_job_progress(job_id, 100, "Speedtest complete")
+            await self.send_job_output(job_id, f"✓ Complete: {response['data'].get('download_mbps')} Mbps down, {response['data'].get('upload_mbps')} Mbps up")
             self.log(f"Speedtest complete: {response['data'].get('download_mbps')} Mbps down, {response['data'].get('upload_mbps')} Mbps up")
             
         except asyncio.TimeoutError:
             response["success"] = False
             response["error"] = "Speedtest timed out (>180 seconds)"
+            await self.send_job_output(job_id, "ERROR: Speedtest timed out")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"Speedtest error: {e}", "ERROR")
         
         return response
@@ -5231,22 +5541,29 @@ apt-get install -y speedtest
         }
         
         email = command_data.get("email") or command_data.get("target")
+        job_id = command_data.get("job_id")
         if not email:
             response["success"] = False
             response["error"] = "No email specified"
             return response
+        
+        await self.send_job_progress(job_id, 5, "Checking holehe installation...")
         
         # Auto-install holehe if not present
         installed, install_msg = await self.ensure_tool_installed("holehe")
         if not installed:
             response["success"] = False
             response["error"] = f"holehe not available and could not be installed: {install_msg}"
+            await self.send_job_output(job_id, f"ERROR: {install_msg}")
             return response
         if install_msg == "installed":
             response["data"]["auto_installed"] = "holehe"
+            await self.send_job_output(job_id, "Auto-installed holehe")
         
         try:
             self.log(f"Running holehe email OSINT for: {email}")
+            await self.send_job_progress(job_id, 15, f"Checking email: {email}")
+            await self.send_job_output(job_id, f"$ holehe {email} --only-used")
             
             # Run holehe with CSV output for easier parsing
             process = await asyncio.create_subprocess_exec(
@@ -5254,7 +5571,11 @@ apt-get install -y speedtest
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
+            
+            await self.send_job_progress(job_id, 30, "Checking platforms...")
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+            
+            await self.send_job_progress(job_id, 80, "Parsing results...")
             
             output = stdout.decode()
             results = []
@@ -5275,6 +5596,9 @@ apt-get install -y speedtest
                             "email_recovery": parts[2].strip() if len(parts) > 2 else None,
                             "phone_recovery": parts[3].strip() if len(parts) > 3 else None
                         })
+                        await self.send_job_output(job_id, f"✓ Found: {site}")
+            
+            await self.send_job_progress(job_id, 95, "Building response...")
             
             response["data"] = {
                 "email": email,
@@ -5287,14 +5611,17 @@ apt-get install -y speedtest
                 "scanned_at": datetime.utcnow().isoformat()
             }
             
+            await self.send_job_progress(job_id, 100, f"Complete: {len(results)} registrations found")
             self.log(f"Email OSINT complete: found {len(results)} registrations")
             
         except asyncio.TimeoutError:
             response["success"] = False
             response["error"] = "Email OSINT timed out (>120 seconds)"
+            await self.send_job_output(job_id, "ERROR: Timed out")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"Email OSINT error: {e}", "ERROR")
         
         return response
@@ -5309,22 +5636,29 @@ apt-get install -y speedtest
         }
         
         phone = command_data.get("phone") or command_data.get("target")
+        job_id = command_data.get("job_id")
         if not phone:
             response["success"] = False
             response["error"] = "No phone number specified"
             return response
+        
+        await self.send_job_progress(job_id, 5, "Checking phoneinfoga installation...")
         
         # Auto-install phoneinfoga if not present
         installed, install_msg = await self.ensure_tool_installed("phoneinfoga")
         if not installed:
             response["success"] = False
             response["error"] = f"phoneinfoga not available and could not be installed: {install_msg}"
+            await self.send_job_output(job_id, f"ERROR: {install_msg}")
             return response
         if install_msg == "installed":
             response["data"]["auto_installed"] = "phoneinfoga"
+            await self.send_job_output(job_id, "Auto-installed phoneinfoga")
         
         try:
             self.log(f"Running phoneinfoga for: {phone}")
+            await self.send_job_progress(job_id, 15, f"Looking up phone: {phone}")
+            await self.send_job_output(job_id, f"$ phoneinfoga scan -n {phone}")
             
             # Run phoneinfoga scan
             process = await asyncio.create_subprocess_exec(
@@ -5332,7 +5666,11 @@ apt-get install -y speedtest
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
+            
+            await self.send_job_progress(job_id, 40, "Querying databases...")
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+            
+            await self.send_job_progress(job_id, 80, "Parsing results...")
             
             output = stdout.decode()
             
@@ -5351,8 +5689,10 @@ apt-get install -y speedtest
                 line_lower = line.lower()
                 if 'carrier:' in line_lower:
                     results["carrier"] = line.split(':', 1)[1].strip()
+                    await self.send_job_output(job_id, f"Carrier: {results['carrier']}")
                 elif 'country:' in line_lower:
                     results["country"] = line.split(':', 1)[1].strip()
+                    await self.send_job_output(job_id, f"Country: {results['country']}")
                 elif 'region:' in line_lower or 'location:' in line_lower:
                     results["region"] = line.split(':', 1)[1].strip()
                 elif 'line type:' in line_lower or 'type:' in line_lower:
@@ -5368,14 +5708,17 @@ apt-get install -y speedtest
                 "scanned_at": datetime.utcnow().isoformat()
             }
             
+            await self.send_job_progress(job_id, 100, "Phone OSINT complete")
             self.log(f"Phone OSINT complete for: {phone}")
             
         except asyncio.TimeoutError:
             response["success"] = False
             response["error"] = "Phone OSINT timed out (>60 seconds)"
+            await self.send_job_output(job_id, "ERROR: Timed out")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"Phone OSINT error: {e}", "ERROR")
         
         return response
@@ -5390,27 +5733,36 @@ apt-get install -y speedtest
         }
         
         username = command_data.get("username") or command_data.get("target")
+        job_id = command_data.get("job_id")
         if not username:
             response["success"] = False
             response["error"] = "No username specified"
             return response
+        
+        await self.send_job_progress(job_id, 5, "Checking maigret installation...")
         
         # Auto-install maigret if not present
         installed, install_msg = await self.ensure_tool_installed("maigret")
         if not installed:
             response["success"] = False
             response["error"] = f"maigret not available and could not be installed: {install_msg}"
+            await self.send_job_output(job_id, f"ERROR: {install_msg}")
             return response
         if install_msg == "installed":
             response["data"]["auto_installed"] = "maigret"
+            await self.send_job_output(job_id, "Auto-installed maigret")
         
         try:
             self.log(f"Running maigret username OSINT for: {username}")
+            await self.send_job_progress(job_id, 10, f"Searching username: {username}")
+            await self.send_job_output(job_id, f"Searching social networks for: {username}")
             
             # Create temp directory for output
             import tempfile
             with tempfile.TemporaryDirectory() as tmpdir:
                 output_file = os.path.join(tmpdir, "results.json")
+                
+                await self.send_job_progress(job_id, 15, "Running maigret scan...")
                 
                 # Run maigret with JSON output
                 process = await asyncio.create_subprocess_exec(
@@ -5418,7 +5770,11 @@ apt-get install -y speedtest
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
+                
+                await self.send_job_progress(job_id, 40, "Checking social platforms...")
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+                
+                await self.send_job_progress(job_id, 80, "Parsing results...")
                 
                 results = []
                 
@@ -5438,6 +5794,7 @@ apt-get install -y speedtest
                                             "url": info.get('url_user', ''),
                                             "status": info.get('status', '')
                                         })
+                                        await self.send_job_output(job_id, f"✓ Found: {site}")
                     except Exception as e:
                         self.log(f"Error parsing maigret JSON: {e}", "WARNING")
                 
@@ -5456,6 +5813,8 @@ apt-get install -y speedtest
                                     })
                                     break
                 
+                await self.send_job_progress(job_id, 95, "Building response...")
+                
                 response["data"] = {
                     "username": username,
                     "tool": "maigret",
@@ -5467,14 +5826,17 @@ apt-get install -y speedtest
                     "scanned_at": datetime.utcnow().isoformat()
                 }
                 
+                await self.send_job_progress(job_id, 100, f"Complete: {len(results)} profiles found")
                 self.log(f"Username OSINT complete: found {len(results)} profiles")
             
         except asyncio.TimeoutError:
             response["success"] = False
             response["error"] = "Username OSINT timed out (>180 seconds)"
+            await self.send_job_output(job_id, "ERROR: Timed out")
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"Username OSINT error: {e}", "ERROR")
         
         return response
@@ -5492,11 +5854,14 @@ apt-get install -y speedtest
         email = person_data.get("email") or command_data.get("email")
         phone = person_data.get("phone") or command_data.get("phone")
         username = person_data.get("nickname") or person_data.get("username") or command_data.get("username")
+        job_id = command_data.get("job_id")
         
         if not email and not phone and not username:
             response["success"] = False
             response["error"] = "No identifiers (email, phone, or username) provided"
             return response
+        
+        await self.send_job_progress(job_id, 5, "Starting person OSINT scan...")
         
         try:
             all_results = []
@@ -5505,7 +5870,9 @@ apt-get install -y speedtest
             # Run email OSINT if email provided
             if email:
                 self.log(f"Person OSINT: Running email lookup for {email}")
-                email_result = await self.run_email_osint(command_id + "_email", {"email": email})
+                await self.send_job_output(job_id, f"Checking email: {email}")
+                await self.send_job_progress(job_id, 20, "Running email lookup...")
+                email_result = await self.run_email_osint(command_id + "_email", {"email": email, "job_id": job_id})
                 if email_result.get("success"):
                     for r in email_result.get("data", {}).get("results", []):
                         r["source_type"] = "email"
@@ -5517,7 +5884,9 @@ apt-get install -y speedtest
             # Run phone OSINT if phone provided
             if phone:
                 self.log(f"Person OSINT: Running phone lookup for {phone}")
-                phone_result = await self.run_phone_osint(command_id + "_phone", {"phone": phone})
+                await self.send_job_output(job_id, f"Checking phone: {phone}")
+                await self.send_job_progress(job_id, 45, "Running phone lookup...")
+                phone_result = await self.run_phone_osint(command_id + "_phone", {"phone": phone, "job_id": job_id})
                 if phone_result.get("success"):
                     for r in phone_result.get("data", {}).get("results", []):
                         r["source_type"] = "phone"
@@ -5529,7 +5898,9 @@ apt-get install -y speedtest
             # Run username OSINT if username provided
             if username:
                 self.log(f"Person OSINT: Running username lookup for {username}")
-                username_result = await self.run_username_osint(command_id + "_username", {"username": username})
+                await self.send_job_output(job_id, f"Checking username: {username}")
+                await self.send_job_progress(job_id, 70, "Running username lookup...")
+                username_result = await self.run_username_osint(command_id + "_username", {"username": username, "job_id": job_id})
                 if username_result.get("success"):
                     for r in username_result.get("data", {}).get("results", []):
                         r["source_type"] = "username"
@@ -5537,6 +5908,8 @@ apt-get install -y speedtest
                         all_results.append(r)
                 else:
                     errors.append(f"Username OSINT: {username_result.get('error')}")
+            
+            await self.send_job_progress(job_id, 95, "Building response...")
             
             response["data"] = {
                 "person_data": person_data,
@@ -5553,11 +5926,13 @@ apt-get install -y speedtest
                 response["success"] = False
                 response["error"] = "; ".join(errors)
             
+            await self.send_job_progress(job_id, 100, f"Complete: {len(all_results)} total results")
             self.log(f"Person OSINT complete: found {len(all_results)} total results")
             
         except Exception as e:
             response["success"] = False
             response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             self.log(f"Person OSINT error: {e}", "ERROR")
         
         return response
@@ -5573,6 +5948,7 @@ apt-get install -y speedtest
         
         company_data = command_data.get("company_data", {})
         domain = company_data.get("domain") or company_data.get("website") or command_data.get("target")
+        job_id = command_data.get("job_id")
         
         if not domain:
             response["success"] = False
@@ -5585,11 +5961,15 @@ apt-get install -y speedtest
             domain = urlparse(domain).netloc or domain
         domain = domain.split('/')[0]
         
+        await self.send_job_progress(job_id, 5, f"Starting company OSINT for {domain}")
+        
         try:
             results = []
             
             # 1. DNS enumeration
             self.log(f"Company OSINT: DNS enumeration for {domain}")
+            await self.send_job_output(job_id, f"Enumerating DNS for {domain}")
+            await self.send_job_progress(job_id, 15, "Running DNS enumeration...")
             dns_results = {
                 "type": "dns",
                 "mx_records": [],
@@ -5609,6 +5989,8 @@ apt-get install -y speedtest
                         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
                         records = [r.strip() for r in stdout.decode().strip().split('\n') if r.strip()]
                         dns_results[f"{rtype.lower()}_records"] = records
+                        if records:
+                            await self.send_job_output(job_id, f"{rtype}: {len(records)} records")
                     except:
                         pass
             
@@ -5617,6 +5999,8 @@ apt-get install -y speedtest
             
             # 2. Subdomain enumeration (basic - using common subdomains)
             self.log(f"Company OSINT: Subdomain enumeration for {domain}")
+            await self.send_job_progress(job_id, 40, "Checking subdomains...")
+            await self.send_job_output(job_id, "Checking common subdomains...")
             common_subdomains = ["www", "mail", "webmail", "ftp", "admin", "blog", "dev", "staging", 
                                  "api", "app", "portal", "vpn", "remote", "secure", "shop", "store"]
             
@@ -5627,6 +6011,7 @@ apt-get install -y speedtest
                 try:
                     socket.gethostbyname(subdomain)
                     found_subdomains.append(subdomain)
+                    await self.send_job_output(job_id, f"✓ Found: {subdomain}")
                 except:
                     pass
             
@@ -5637,6 +6022,8 @@ apt-get install -y speedtest
                 })
             
             # 3. Check for SPF/DMARC/DKIM (email security)
+            await self.send_job_progress(job_id, 70, "Checking email security...")
+            await self.send_job_output(job_id, "Checking email security (SPF/DMARC)...")
             email_security = {
                 "type": "email_security",
                 "has_spf": False,
@@ -5655,6 +6042,7 @@ apt-get install -y speedtest
                     stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
                     if 'v=spf1' in stdout.decode().lower():
                         email_security["has_spf"] = True
+                        await self.send_job_output(job_id, "✓ SPF record found")
                 except:
                     pass
                 
@@ -5668,10 +6056,13 @@ apt-get install -y speedtest
                     stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
                     if 'v=dmarc1' in stdout.decode().lower():
                         email_security["has_dmarc"] = True
+                        await self.send_job_output(job_id, "✓ DMARC record found")
                 except:
                     pass
             
             results.append(email_security)
+            
+            await self.send_job_progress(job_id, 95, "Building response...")
             
             response["data"] = {
                 "domain": domain,
@@ -5682,10 +6073,13 @@ apt-get install -y speedtest
                 "scanned_at": datetime.utcnow().isoformat()
             }
             
+            await self.send_job_progress(job_id, 100, f"Complete: {len(found_subdomains)} subdomains found")
             self.log(f"Company OSINT complete for {domain}: {len(results)} result groups")
             
         except Exception as e:
             response["success"] = False
+            response["error"] = str(e)
+            await self.send_job_output(job_id, f"ERROR: {e}")
             response["error"] = str(e)
             self.log(f"Company OSINT error: {e}", "ERROR")
         
@@ -5693,6 +6087,9 @@ apt-get install -y speedtest
     
     async def run_dns_lookup(self, command_id: str, command_data: dict) -> dict:
         """Perform DNS lookup"""
+        job_id = command_data.get("job_id")
+        await self.send_job_progress(job_id, 10, "Starting DNS lookup...")
+        
         response = {
             "type": "response",
             "command_id": command_id,
@@ -5721,15 +6118,23 @@ apt-get install -y speedtest
             }
             
             # Get A records
+            await self.send_job_progress(job_id, 25, "Looking up A records...")
+            await self.send_job_output(job_id, f"Looking up A records for {target}...")
             try:
                 ips = socket.gethostbyname_ex(target)
                 results["a_records"] = ips[2]
+                if ips[2]:
+                    await self.send_job_output(job_id, f"Found {len(ips[2])} A records")
             except:
                 pass
             
             # Use dig if available for more record types
             if shutil.which("dig"):
-                for rtype in ["MX", "NS", "TXT"]:
+                rtypes = ["MX", "NS", "TXT"]
+                for i, rtype in enumerate(rtypes):
+                    progress = 40 + (i * 20)
+                    await self.send_job_progress(job_id, progress, f"Looking up {rtype} records...")
+                    await self.send_job_output(job_id, f"Looking up {rtype} records for {target}...")
                     try:
                         process = await asyncio.create_subprocess_exec(
                             "dig", "+short", rtype, target,
@@ -5739,6 +6144,8 @@ apt-get install -y speedtest
                         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
                         records = [r.strip() for r in stdout.decode().strip().split('\n') if r.strip()]
                         results[f"{rtype.lower()}_records"] = records
+                        if records:
+                            await self.send_job_output(job_id, f"Found {len(records)} {rtype} records")
                     except:
                         pass
             
@@ -5752,6 +6159,7 @@ apt-get install -y speedtest
             }
             
             self.log(f"DNS lookup complete: {len(results['a_records'])} A records")
+            await self.send_job_progress(job_id, 100, "DNS lookup complete")
             
         except Exception as e:
             response["success"] = False
