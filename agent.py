@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.5"
+VERSION = "1.10.6"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -92,11 +92,27 @@ def _get_agent_update_url():
         return os.environ.get("MICROHACK_AGENT_UPDATE_URL")
     
     # Derive from server URL if available
+    # Server URL is WebSocket URL like wss://host/ws/agent or ws://host:port/ws/agent
     server_url = os.environ.get("MICROHACK_SERVER_URL", "")
     if server_url:
-        # Remove trailing slash and append agent path
-        base = server_url.rstrip('/')
-        return f"{base}/agent/agent.py"
+        # Convert wss:// to https:// or ws:// to http://
+        if server_url.startswith("wss://"):
+            base = "https://" + server_url[6:]
+        elif server_url.startswith("ws://"):
+            base = "http://" + server_url[5:]
+        else:
+            base = server_url
+        
+        # Remove /ws/agent or any path suffix to get the API base
+        # e.g. wss://host.com/ws/agent -> https://host.com
+        if "/ws/agent" in base:
+            base = base.split("/ws/agent")[0]
+        elif "/ws" in base:
+            base = base.split("/ws")[0]
+        
+        base = base.rstrip('/')
+        # The backend endpoint is at /api/agents/agent.py
+        return f"{base}/api/agents/agent.py"
     
     # Fallback to GitHub (may not have latest)
     return "https://raw.githubusercontent.com/cheshirecat78/micro-hack/main/agent/agent.py"
