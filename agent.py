@@ -2091,24 +2091,27 @@ class MicroHackAgent:
                 except Exception:
                     env['HOME'] = '/root' if _os.getuid() == 0 else '/tmp'
             
-            # Use login shell for proper initialization (tab completion, aliases, etc.)
-            # Wrap command to start as interactive login shell
+            # Determine the shell to use - avoid job control issues
+            # Use exec to replace shell process and reduce startup messages
             if command in ('/bin/bash', 'bash'):
-                shell_cmd = '/bin/bash --login -i'
+                # Start bash without job control messages
+                # --norc --noprofile avoids slow startup, we send our own MOTD
+                # Set PS1 to empty initially, our MOTD provides the prompt
+                shell_args = ['/bin/bash', '--norc', '--noprofile', '-i']
             elif command in ('/bin/sh', 'sh'):
-                shell_cmd = command
+                shell_args = ['/bin/sh']
             else:
-                shell_cmd = command
+                shell_args = command.split() if isinstance(command, str) else command
             
-            # Start shell with PTY
+            # Start shell with PTY using direct exec (no shell=True)
+            # This avoids the "cannot set terminal process group" message
             proc = subprocess.Popen(
-                shell_cmd,
-                shell=True,
+                shell_args,
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
                 env=env,
-                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
+                start_new_session=True  # Creates new session, makes it session leader
             )
             
             # Close slave in parent - child has it
@@ -2129,7 +2132,7 @@ class MicroHackAgent:
             task = asyncio.create_task(self._session_reader(session_id))
             self._session_tasks[session_id] = task
             
-            # Send MOTD after a short delay to ensure shell is ready
+            # Send MOTD immediately (reduced delay)
             asyncio.create_task(self._send_shell_motd(session_id))
 
             response["data"] = {"session_id": session_id}
@@ -2144,13 +2147,14 @@ class MicroHackAgent:
 
     async def _send_shell_motd(self, session_id: str):
         """Send a fancy MOTD banner after shell starts"""
-        await asyncio.sleep(0.3)  # Wait for shell to initialize
+        await asyncio.sleep(0.05)  # Minimal delay - just enough for PTY to be ready
         
         if session_id not in self.shell_sessions:
             return
         
         # Get system info for MOTD
         import platform
+        import getpass
         try:
             uname = platform.uname()
             kernel = uname.release
@@ -2159,22 +2163,68 @@ class MicroHackAgent:
             kernel = "unknown"
             arch = "unknown"
         
-        # Fancy MOTD with μHack branding
+        # Get current user for prompt
+        try:
+            current_user = getpass.getuser()
+        except:
+            current_user = "user"
+        
+        # Get agent name (use hostname as fallback)
+        agent_name = self.hostname
+        
+        # Get external IP and status info
+        external_ip = self.remote_ip or "detecting..."
+        
+        # UPnP status
+        upnp_status = "\033[38;5;245m○ unknown\033[0m"
+        
+        # Webserver status
+        if self._webserver_enabled and self._local_webserver and self._local_webserver.running:
+            webserver_status = f"\033[38;5;82m● running\033[0m (:{self._webserver_port})"
+        else:
+            webserver_status = "\033[38;5;245m○ stopped\033[0m"
+        
+        # Location info
+        location_str = ""
+        if self.location:
+            city = self.location.get('city', '')
+            country = self.location.get('country', '')
+            if city and country:
+                location_str = f"{city}, {country}"
+            elif country:
+                location_str = country
+        
+        # Weather placeholder (would need API call)
+        weather_str = ""
+        if self.location:
+            # Could fetch weather from wttr.in or similar
+            lat = self.location.get('lat')
+            lon = self.location.get('lon')
+            if lat and lon:
+                weather_str = f"({lat:.1f}°, {lon:.1f}°)"
+        
+        # Build clean MOTD without outer boxes
         motd = f'''\r
-\033[38;5;51m╔══════════════════════════════════════════════════════════════╗\033[0m
-\033[38;5;51m║\033[0m  \033[1;38;5;201m   __ __  __ __           __  \033[0m                               \033[38;5;51m║\033[0m
-\033[38;5;51m║\033[0m  \033[1;38;5;201m  / // / / // /__ _ ____ / /__\033[0m                               \033[38;5;51m║\033[0m
-\033[38;5;51m║\033[0m  \033[1;38;5;201m / _  / / _  / _ `// __//  '_/\033[0m                               \033[38;5;51m║\033[0m
-\033[38;5;51m║\033[0m  \033[1;38;5;201m/_//_(_)_//_/\\_,_/ \\__//_/\\_\\ \033[0m                               \033[38;5;51m║\033[0m
-\033[38;5;51m║\033[0m  \033[38;5;245mμHack Remote Agent v{VERSION:<8}\033[0m                              \033[38;5;51m║\033[0m
-\033[38;5;51m╠══════════════════════════════════════════════════════════════╣\033[0m
-\033[38;5;51m║\033[0m  \033[38;5;82m●\033[0m \033[1mHost:\033[0m    {self.hostname:<20}                       \033[38;5;51m║\033[0m
-\033[38;5;51m║\033[0m  \033[38;5;82m●\033[0m \033[1mKernel:\033[0m  {kernel:<20}                       \033[38;5;51m║\033[0m
-\033[38;5;51m║\033[0m  \033[38;5;82m●\033[0m \033[1mArch:\033[0m    {arch:<20}                       \033[38;5;51m║\033[0m
-\033[38;5;51m║\033[0m  \033[38;5;82m●\033[0m \033[1mSession:\033[0m {session_id[:8]}...                              \033[38;5;51m║\033[0m
-\033[38;5;51m╚══════════════════════════════════════════════════════════════╝\033[0m
-\r
+\033[1;38;5;82mμ\033[0m\033[1;37m-hack\033[0m Remote Agent \033[38;5;245mv{VERSION}\033[0m
+
+\033[38;5;245m────────────────────────────────────────\033[0m
+  \033[1mAgent\033[0m       {agent_name}
+  \033[1mHostname\033[0m    {self.hostname}
+  \033[1mKernel\033[0m      {kernel}
+  \033[1mArch\033[0m        {arch}
+  \033[1mExternal IP\033[0m {external_ip}
+  \033[1mUPnP\033[0m        {upnp_status}
+  \033[1mWebserver\033[0m   {webserver_status}
 '''
+        
+        # Add location if available
+        if location_str:
+            motd += f'''  \033[1mLocation\033[0m    {location_str} {weather_str}
+'''
+        
+        motd += f'''\033[38;5;245m────────────────────────────────────────\033[0m
+
+\033[38;5;82m{current_user}\033[0m@\033[38;5;51m{agent_name}\033[0m:/$ '''
         
         # Send via WebSocket
         if self.ws:
@@ -4642,6 +4692,124 @@ class MicroHackAgent:
         
         return response
     
+    async def run_whois_lookup(self, command_id: str, command_data: dict) -> dict:
+        """Perform WHOIS lookup for domain/IP (requires whois)"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        target = command_data.get("target") or command_data.get("domain")
+        host_id = command_data.get("host_id")
+        
+        if not target:
+            response["success"] = False
+            response["error"] = "No target specified"
+            return response
+        
+        # Check if whois is available, auto-install if needed
+        installed, install_msg = await self.ensure_tool_installed("whois")
+        if not installed:
+            response["success"] = False
+            response["error"] = install_msg
+            return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "whois"
+        
+        try:
+            # Run whois command
+            process = await asyncio.create_subprocess_exec(
+                "whois", target,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+            
+            output = stdout.decode('utf-8', errors='replace').strip()
+            
+            # Parse WHOIS output into structured data
+            whois_data = {
+                "domain": target,
+                "registrar": None,
+                "creation_date": None,
+                "expiration_date": None,
+                "name_servers": [],
+                "registrant": None,
+                "emails": [],
+                "raw": output
+            }
+            
+            # Common WHOIS field patterns
+            import re
+            
+            for line in output.split('\n'):
+                line_lower = line.lower().strip()
+                
+                # Registrar
+                if 'registrar:' in line_lower:
+                    whois_data["registrar"] = line.split(':', 1)[-1].strip()
+                
+                # Creation date
+                elif any(x in line_lower for x in ['creation date:', 'created:', 'created on:', 'registration date:']):
+                    whois_data["creation_date"] = line.split(':', 1)[-1].strip()
+                
+                # Expiration date
+                elif any(x in line_lower for x in ['expir', 'registry expiry']):
+                    if ':' in line:
+                        whois_data["expiration_date"] = line.split(':', 1)[-1].strip()
+                
+                # Name servers
+                elif 'name server:' in line_lower or 'nserver:' in line_lower:
+                    ns = line.split(':', 1)[-1].strip()
+                    if ns and ns not in whois_data["name_servers"]:
+                        whois_data["name_servers"].append(ns)
+                
+                # Registrant/Organization
+                elif any(x in line_lower for x in ['registrant organization:', 'registrant:', 'org:']):
+                    val = line.split(':', 1)[-1].strip()
+                    if val and not whois_data["registrant"]:
+                        whois_data["registrant"] = val
+                
+                # Emails
+                email_match = re.search(r'[\w.+-]+@[\w.-]+\.\w+', line)
+                if email_match:
+                    email = email_match.group()
+                    if email not in whois_data["emails"]:
+                        whois_data["emails"].append(email)
+            
+            # Convert lists to strings for consistency
+            whois_data["name_servers_str"] = ', '.join(whois_data["name_servers"])
+            whois_data["emails_str"] = ', '.join(whois_data["emails"])
+            
+            response["data"] = {
+                "domain": target,
+                "host_id": host_id,
+                "registrar": whois_data["registrar"],
+                "creation_date": whois_data["creation_date"],
+                "expiration_date": whois_data["expiration_date"],
+                "name_servers": whois_data["name_servers_str"],
+                "registrant": whois_data["registrant"],
+                "emails": whois_data["emails_str"],
+                "raw_output": output,
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname,
+                "scanned_at": datetime.utcnow().isoformat()
+            }
+            
+            self.log(f"WHOIS lookup complete: {target}")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "WHOIS lookup timed out"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"WHOIS lookup error: {e}", "ERROR")
+        
+        return response
+    
     async def run_ip_reputation(self, command_id: str, command_data: dict) -> dict:
         """Check IP reputation via DNS blacklists"""
         response = {
@@ -6654,6 +6822,12 @@ apt-get install -y speedtest
                 self.log(f"Starting dig lookup for command_id: {command_id}")
                 response = await self.run_dig_lookup(command_id, command_data)
                 self.log(f"Dig lookup complete, success: {response.get('success')}")
+            
+            elif command == "whois":
+                # WHOIS lookup
+                self.log(f"Starting WHOIS lookup for command_id: {command_id}")
+                response = await self.run_whois_lookup(command_id, command_data)
+                self.log(f"WHOIS lookup complete, success: {response.get('success')}")
             
             elif command == "ip_reputation":
                 # IP reputation check
