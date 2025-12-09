@@ -2399,31 +2399,67 @@ class MicroHackAgent:
         # Always use -oX - for XML output to stdout
         cmd = ["nmap", "-oX", "-"]
         
-        # Handle job dispatcher scan types (nmap_quick, nmap_full, nmap_vuln)
-        # and legacy scan types (quick, full, ports, vuln, discovery)
-        if scan_type in ("quick", "nmap_quick", "syn"):
-            cmd.extend(["-T4", "-F"])  # Fast scan, top 100 ports
-        elif scan_type in ("full", "nmap_full"):
-            # Perform an exhaustive/full scan:
-            # -sS : TCP SYN scan (stealth, faster and more complete)
-            # -sV : Version detection
-            # -O  : OS detection
-            # -p- : scan all ports
-            # -Pn : skip host discovery (treat host as up)
-            # --script default,vuln : run default and vuln scripts (may be slow)
-            cmd.extend(["-T4", "-sS", "-sV", "-O", "-Pn", "-p-", "--script", "default,vuln"])
+        # =================================================================
+        # SCAN TYPES - Clear separation between network and host scans
+        # =================================================================
+        # 
+        # NETWORK SCANS (discover hosts in a network/CIDR):
+        #   nmap_network_quick    - Fast ping sweep, may miss some hosts
+        #   nmap_network_thorough - Thorough discovery, finds hidden hosts
+        #
+        # HOST SCANS (scan ports/services on a single host):
+        #   nmap_host_quick       - Quick port scan (top 100 ports)
+        #   nmap_host_thorough    - Full port scan with service detection
+        #   nmap_host_vuln        - Vulnerability scan on known ports
+        #
+        # LEGACY (for backwards compatibility):
+        #   quick, nmap_quick, discovery, full, nmap_full, vuln, nmap_vuln
+        # =================================================================
+        
+        # --- NETWORK SCANS (host discovery) ---
+        if scan_type in ("nmap_network_quick", "discovery", "nmap_discovery"):
+            # Fast ping sweep - quick but may miss hosts with ICMP blocked
+            cmd.extend(["-sn", "-T4"])
+        elif scan_type == "nmap_network_thorough":
+            # Thorough network discovery - finds hosts that block ICMP
+            # -sn: no port scan, -PE: ICMP echo, -PP: timestamp, -PM: netmask
+            # -PS: TCP SYN ping, -PA: TCP ACK ping, -PU: UDP ping
+            cmd.extend(["-sn", "-T4", "-PE", "-PP", "-PM", "-PS21,22,23,25,80,443,3389", "-PA80,443", "-PU53,67,68,123"])
+        
+        # --- HOST SCANS (port/service scanning) ---
+        elif scan_type in ("nmap_host_quick", "quick", "nmap_quick", "syn"):
+            # Quick port scan - top 100 ports, fast
+            cmd.extend(["-T4", "-F"])
+        elif scan_type in ("nmap_host_thorough", "full", "nmap_full", "thorough", "nmap_thorough"):
+            # Thorough host scan - all ports, service/OS detection
+            # -sS: SYN scan, -sV: version, -O: OS, -p-: all ports, -Pn: skip discovery
+            cmd.extend(["-T4", "-sS", "-sV", "-O", "-Pn", "-p-"])
+        elif scan_type in ("nmap_host_vuln", "vuln", "nmap_vuln"):
+            # Vulnerability scan - runs vuln scripts
+            # Check for custom scripts in options
+            opts = command_data.get("options", {})
+            scripts = opts.get("scripts") if isinstance(opts, dict) else None
+            if scripts and isinstance(scripts, list) and len(scripts) > 0:
+                # Use custom script selection
+                script_str = ",".join(scripts)
+                self.log(f"Using custom vuln scripts: {script_str}")
+                cmd.extend(["-T4", "-sV", "--script", script_str, "-Pn"])
+            else:
+                # Default vuln scripts
+                cmd.extend(["-T4", "-sV", "--script", "vuln", "-Pn"])
+            if ports:
+                cmd.extend(["-p", ports])
+        
+        # --- UTILITY SCANS ---
         elif scan_type in ("ports", "connect"):
-            cmd.extend(["-T4", "-sV"])  # Version detection
+            # Specific port scan with version detection
+            cmd.extend(["-T4", "-sV"])
             if ports:
                 cmd.extend(["-p", ports])
-        elif scan_type in ("vuln", "nmap_vuln"):
-            cmd.extend(["-T4", "-sV", "--script", "vuln"])
-            if ports:
-                cmd.extend(["-p", ports])
-        elif scan_type == "discovery":
-            cmd.extend(["-sn"])  # Ping scan only, no port scan
+        
         else:
-            # Default to quick scan for any unrecognized type
+            # Default to quick host scan for any unrecognized type
+            self.log(f"Unknown scan_type '{scan_type}', defaulting to quick host scan")
             cmd.extend(["-T4", "-F"])
         
         # Add extra arguments if provided (be careful with this)
