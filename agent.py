@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.6"
+VERSION = "1.10.7"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -207,7 +207,16 @@ def auto_update_on_startup():
         print(f"[UPDATE] Updated to v{new_version}, restarting...", flush=True)
         
         # Restart the agent with the new code
-        os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
+        # Use subprocess + exit instead of os.execv for better Termux/Android compatibility
+        try:
+            # Try subprocess approach first (more compatible)
+            import subprocess as sp
+            sp.Popen([sys.executable, current_script] + sys.argv[1:])
+            sys.exit(0)  # Exit current process, new one will take over
+        except Exception as restart_err:
+            print(f"[UPDATE] Subprocess restart failed ({restart_err}), trying execv...", flush=True)
+            # Fallback to execv
+            os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
         
     except Exception as e:
         print(f"[UPDATE] Update check failed: {e} (continuing with current version)", flush=True)
