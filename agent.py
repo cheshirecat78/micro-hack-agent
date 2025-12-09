@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.15"
+VERSION = "1.10.17"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -1923,6 +1923,9 @@ class MicroHackAgent:
             # Start reader task
             task = asyncio.create_task(self._session_reader(session_id))
             self._session_tasks[session_id] = task
+            
+            # Send MOTD after a short delay to ensure shell is ready
+            asyncio.create_task(self._send_shell_motd(session_id))
 
             response["data"] = {"session_id": session_id}
             response["success"] = True
@@ -1933,6 +1936,54 @@ class MicroHackAgent:
             response["success"] = False
             response["error"] = str(e)
             return response
+
+    async def _send_shell_motd(self, session_id: str):
+        """Send a fancy MOTD banner after shell starts"""
+        await asyncio.sleep(0.3)  # Wait for shell to initialize
+        
+        if session_id not in self.shell_sessions:
+            return
+        
+        # Get system info for MOTD
+        import platform
+        try:
+            uname = platform.uname()
+            kernel = uname.release
+            arch = uname.machine
+        except:
+            kernel = "unknown"
+            arch = "unknown"
+        
+        # Fancy MOTD with μHack branding
+        motd = f'''\r
+\033[38;5;51m╔══════════════════════════════════════════════════════════════╗\033[0m
+\033[38;5;51m║\033[0m  \033[1;38;5;201m   __ __  __ __           __  \033[0m                               \033[38;5;51m║\033[0m
+\033[38;5;51m║\033[0m  \033[1;38;5;201m  / // / / // /__ _ ____ / /__\033[0m                               \033[38;5;51m║\033[0m
+\033[38;5;51m║\033[0m  \033[1;38;5;201m / _  / / _  / _ `// __//  '_/\033[0m                               \033[38;5;51m║\033[0m
+\033[38;5;51m║\033[0m  \033[1;38;5;201m/_//_(_)_//_/\\_,_/ \\__//_/\\_\\ \033[0m                               \033[38;5;51m║\033[0m
+\033[38;5;51m║\033[0m  \033[38;5;245mμHack Remote Agent v{VERSION:<8}\033[0m                              \033[38;5;51m║\033[0m
+\033[38;5;51m╠══════════════════════════════════════════════════════════════╣\033[0m
+\033[38;5;51m║\033[0m  \033[38;5;82m●\033[0m \033[1mHost:\033[0m    {self.hostname:<20}                       \033[38;5;51m║\033[0m
+\033[38;5;51m║\033[0m  \033[38;5;82m●\033[0m \033[1mKernel:\033[0m  {kernel:<20}                       \033[38;5;51m║\033[0m
+\033[38;5;51m║\033[0m  \033[38;5;82m●\033[0m \033[1mArch:\033[0m    {arch:<20}                       \033[38;5;51m║\033[0m
+\033[38;5;51m║\033[0m  \033[38;5;82m●\033[0m \033[1mSession:\033[0m {session_id[:8]}...                              \033[38;5;51m║\033[0m
+\033[38;5;51m╚══════════════════════════════════════════════════════════════╝\033[0m
+\r
+'''
+        
+        # Send via WebSocket
+        if self.ws:
+            try:
+                msg = json.dumps({
+                    "type": "shell_output",
+                    "session_id": session_id,
+                    "output": motd,
+                    "agent_id": self.agent_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                await self.ws.send(msg)
+            except Exception as e:
+                self.log(f"Failed to send MOTD: {e}", "WARNING")
 
     async def _session_reader(self, session_id: str):
         """Read from PTY master and send shell_output messages to the server."""
@@ -3861,7 +3912,11 @@ class MicroHackAgent:
                 stderr=asyncio.subprocess.PIPE
             )
             
-            await asyncio.wait_for(process.communicate(), timeout=90)  # 90 seconds for slow sites
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)  # 90 seconds for slow sites
+            
+            # Log chromium result for debugging
+            if process.returncode != 0:
+                self.log(f"Chromium exited with code {process.returncode}, stderr: {stderr.decode('utf-8', errors='replace')[:500]}", "WARNING")
             
             # Read and encode screenshot
             import os
@@ -3880,7 +3935,9 @@ class MicroHackAgent:
                     "agent_id": self.agent_id,
                     "agent_hostname": self.hostname
                 }
-                self.log(f"Screenshot complete: {len(screenshot_data)} bytes")
+                # Log size info for debugging large responses
+                response_size = len(json.dumps(response))
+                self.log(f"Screenshot complete: {len(screenshot_data)} bytes base64, response size: {response_size} bytes")
             else:
                 response["success"] = False
                 response["error"] = "Screenshot file was not created"
@@ -5706,10 +5763,16 @@ apt-get install -y speedtest
         
         # Send response
         if self.ws:
-            response_json = json.dumps(response)
-            self.log(f"Sending response for command_id: {command_id}, size: {len(response_json)} bytes")
-            await self.ws.send(response_json)
-            self.log(f"Response sent successfully")
+            try:
+                response_json = json.dumps(response)
+                response_size = len(response_json)
+                self.log(f"Sending response for command_id: {command_id}, size: {response_size} bytes ({response_size/1024:.1f} KB)")
+                await self.ws.send(response_json)
+                self.log(f"Response sent successfully for command_id: {command_id}")
+            except Exception as send_err:
+                self.log(f"Failed to send response for command_id {command_id}: {send_err}", "ERROR")
+        else:
+            self.log(f"Cannot send response for command_id {command_id}: no WebSocket connection", "ERROR")
     
     async def _priority_worker(self, worker_id: int):
         """Worker that processes high-priority commands (info, ping, shell) with no cooldown"""
