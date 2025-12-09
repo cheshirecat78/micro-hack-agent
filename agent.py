@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.18"
+VERSION = "1.10.20"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -4807,6 +4807,480 @@ apt-get install -y speedtest
             self.log(f"Speedtest error: {e}", "ERROR")
         
         return response
+
+    # =============================================================================
+    # OSINT SCAN FUNCTIONS
+    # =============================================================================
+    
+    async def run_email_osint(self, command_id: str, command_data: dict) -> dict:
+        """Run email OSINT using holehe - checks which sites an email is registered on"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        email = command_data.get("email") or command_data.get("target")
+        if not email:
+            response["success"] = False
+            response["error"] = "No email specified"
+            return response
+        
+        # Auto-install holehe if not present
+        installed, install_msg = await self.ensure_tool_installed("holehe")
+        if not installed:
+            response["success"] = False
+            response["error"] = f"holehe not available and could not be installed: {install_msg}"
+            return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "holehe"
+        
+        try:
+            self.log(f"Running holehe email OSINT for: {email}")
+            
+            # Run holehe with CSV output for easier parsing
+            process = await asyncio.create_subprocess_exec(
+                "holehe", email, "--only-used", "-C",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+            
+            output = stdout.decode()
+            results = []
+            
+            # Parse CSV output: site,used,email_recovery,phone_recovery,other
+            lines = output.strip().split('\n')
+            for line in lines[1:]:  # Skip header
+                if not line.strip():
+                    continue
+                parts = line.split(',')
+                if len(parts) >= 2:
+                    site = parts[0].strip()
+                    used = parts[1].strip().lower() == 'true'
+                    if used:
+                        results.append({
+                            "platform": site,
+                            "found": True,
+                            "email_recovery": parts[2].strip() if len(parts) > 2 else None,
+                            "phone_recovery": parts[3].strip() if len(parts) > 3 else None
+                        })
+            
+            response["data"] = {
+                "email": email,
+                "tool": "holehe",
+                "results": results,
+                "total_found": len(results),
+                "raw_output": output[:5000],  # Limit raw output size
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname,
+                "scanned_at": datetime.utcnow().isoformat()
+            }
+            
+            self.log(f"Email OSINT complete: found {len(results)} registrations")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Email OSINT timed out (>120 seconds)"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Email OSINT error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_phone_osint(self, command_id: str, command_data: dict) -> dict:
+        """Run phone OSINT using phoneinfoga"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        phone = command_data.get("phone") or command_data.get("target")
+        if not phone:
+            response["success"] = False
+            response["error"] = "No phone number specified"
+            return response
+        
+        # Auto-install phoneinfoga if not present
+        installed, install_msg = await self.ensure_tool_installed("phoneinfoga")
+        if not installed:
+            response["success"] = False
+            response["error"] = f"phoneinfoga not available and could not be installed: {install_msg}"
+            return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "phoneinfoga"
+        
+        try:
+            self.log(f"Running phoneinfoga for: {phone}")
+            
+            # Run phoneinfoga scan
+            process = await asyncio.create_subprocess_exec(
+                "phoneinfoga", "scan", "-n", phone,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+            
+            output = stdout.decode()
+            
+            # Parse output for useful info
+            results = {
+                "phone": phone,
+                "valid": "valid" in output.lower(),
+                "carrier": None,
+                "country": None,
+                "region": None,
+                "line_type": None
+            }
+            
+            # Extract info from output
+            for line in output.split('\n'):
+                line_lower = line.lower()
+                if 'carrier:' in line_lower:
+                    results["carrier"] = line.split(':', 1)[1].strip()
+                elif 'country:' in line_lower:
+                    results["country"] = line.split(':', 1)[1].strip()
+                elif 'region:' in line_lower or 'location:' in line_lower:
+                    results["region"] = line.split(':', 1)[1].strip()
+                elif 'line type:' in line_lower or 'type:' in line_lower:
+                    results["line_type"] = line.split(':', 1)[1].strip()
+            
+            response["data"] = {
+                "phone": phone,
+                "tool": "phoneinfoga",
+                "results": [results],
+                "raw_output": output[:5000],
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname,
+                "scanned_at": datetime.utcnow().isoformat()
+            }
+            
+            self.log(f"Phone OSINT complete for: {phone}")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Phone OSINT timed out (>60 seconds)"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Phone OSINT error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_username_osint(self, command_id: str, command_data: dict) -> dict:
+        """Run username OSINT using maigret - checks social networks for username"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        username = command_data.get("username") or command_data.get("target")
+        if not username:
+            response["success"] = False
+            response["error"] = "No username specified"
+            return response
+        
+        # Auto-install maigret if not present
+        installed, install_msg = await self.ensure_tool_installed("maigret")
+        if not installed:
+            response["success"] = False
+            response["error"] = f"maigret not available and could not be installed: {install_msg}"
+            return response
+        if install_msg == "installed":
+            response["data"]["auto_installed"] = "maigret"
+        
+        try:
+            self.log(f"Running maigret username OSINT for: {username}")
+            
+            # Create temp directory for output
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmpdir:
+                output_file = os.path.join(tmpdir, "results.json")
+                
+                # Run maigret with JSON output
+                process = await asyncio.create_subprocess_exec(
+                    "maigret", username, "--json", "simple", "-o", output_file, "--timeout", "10",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+                
+                results = []
+                
+                # Try to read JSON output
+                if os.path.exists(output_file):
+                    try:
+                        with open(output_file, 'r') as f:
+                            import json as json_module
+                            data = json_module.load(f)
+                            # maigret outputs {username: {site: {url_user: ..., status: ...}}}
+                            if username in data:
+                                for site, info in data[username].items():
+                                    if info.get('status') == 'Claimed':
+                                        results.append({
+                                            "platform": site,
+                                            "found": True,
+                                            "url": info.get('url_user', ''),
+                                            "status": info.get('status', '')
+                                        })
+                    except Exception as e:
+                        self.log(f"Error parsing maigret JSON: {e}", "WARNING")
+                
+                # Fallback: parse stdout
+                if not results:
+                    output = stdout.decode()
+                    for line in output.split('\n'):
+                        if '[+]' in line:  # Found indicator
+                            parts = line.split()
+                            for part in parts:
+                                if part.startswith('http'):
+                                    results.append({
+                                        "platform": "unknown",
+                                        "found": True,
+                                        "url": part
+                                    })
+                                    break
+                
+                response["data"] = {
+                    "username": username,
+                    "tool": "maigret",
+                    "results": results,
+                    "total_found": len(results),
+                    "raw_output": stdout.decode()[:5000],
+                    "agent_id": self.agent_id,
+                    "agent_hostname": self.hostname,
+                    "scanned_at": datetime.utcnow().isoformat()
+                }
+                
+                self.log(f"Username OSINT complete: found {len(results)} profiles")
+            
+        except asyncio.TimeoutError:
+            response["success"] = False
+            response["error"] = "Username OSINT timed out (>180 seconds)"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Username OSINT error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_person_osint(self, command_id: str, command_data: dict) -> dict:
+        """Run comprehensive person OSINT - combines email, phone, username lookups"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        person_data = command_data.get("person_data", {})
+        email = person_data.get("email") or command_data.get("email")
+        phone = person_data.get("phone") or command_data.get("phone")
+        username = person_data.get("nickname") or person_data.get("username") or command_data.get("username")
+        
+        if not email and not phone and not username:
+            response["success"] = False
+            response["error"] = "No identifiers (email, phone, or username) provided"
+            return response
+        
+        try:
+            all_results = []
+            errors = []
+            
+            # Run email OSINT if email provided
+            if email:
+                self.log(f"Person OSINT: Running email lookup for {email}")
+                email_result = await self.run_email_osint(command_id + "_email", {"email": email})
+                if email_result.get("success"):
+                    for r in email_result.get("data", {}).get("results", []):
+                        r["source_type"] = "email"
+                        r["source_value"] = email
+                        all_results.append(r)
+                else:
+                    errors.append(f"Email OSINT: {email_result.get('error')}")
+            
+            # Run phone OSINT if phone provided
+            if phone:
+                self.log(f"Person OSINT: Running phone lookup for {phone}")
+                phone_result = await self.run_phone_osint(command_id + "_phone", {"phone": phone})
+                if phone_result.get("success"):
+                    for r in phone_result.get("data", {}).get("results", []):
+                        r["source_type"] = "phone"
+                        r["source_value"] = phone
+                        all_results.append(r)
+                else:
+                    errors.append(f"Phone OSINT: {phone_result.get('error')}")
+            
+            # Run username OSINT if username provided
+            if username:
+                self.log(f"Person OSINT: Running username lookup for {username}")
+                username_result = await self.run_username_osint(command_id + "_username", {"username": username})
+                if username_result.get("success"):
+                    for r in username_result.get("data", {}).get("results", []):
+                        r["source_type"] = "username"
+                        r["source_value"] = username
+                        all_results.append(r)
+                else:
+                    errors.append(f"Username OSINT: {username_result.get('error')}")
+            
+            response["data"] = {
+                "person_data": person_data,
+                "results": all_results,
+                "total_found": len(all_results),
+                "errors": errors if errors else None,
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname,
+                "scanned_at": datetime.utcnow().isoformat()
+            }
+            
+            # Mark as partial success if some lookups failed
+            if errors and not all_results:
+                response["success"] = False
+                response["error"] = "; ".join(errors)
+            
+            self.log(f"Person OSINT complete: found {len(all_results)} total results")
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Person OSINT error: {e}", "ERROR")
+        
+        return response
+    
+    async def run_company_osint(self, command_id: str, command_data: dict) -> dict:
+        """Run company OSINT - domain enumeration, email harvesting"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {}
+        }
+        
+        company_data = command_data.get("company_data", {})
+        domain = company_data.get("domain") or company_data.get("website") or command_data.get("target")
+        
+        if not domain:
+            response["success"] = False
+            response["error"] = "No domain specified for company OSINT"
+            return response
+        
+        # Clean domain (remove http/https and paths)
+        if domain.startswith('http'):
+            from urllib.parse import urlparse
+            domain = urlparse(domain).netloc or domain
+        domain = domain.split('/')[0]
+        
+        try:
+            results = []
+            
+            # 1. DNS enumeration
+            self.log(f"Company OSINT: DNS enumeration for {domain}")
+            dns_results = {
+                "type": "dns",
+                "mx_records": [],
+                "ns_records": [],
+                "txt_records": [],
+                "a_records": []
+            }
+            
+            if shutil.which("dig"):
+                for rtype in ["A", "MX", "NS", "TXT"]:
+                    try:
+                        process = await asyncio.create_subprocess_exec(
+                            "dig", "+short", rtype, domain,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+                        records = [r.strip() for r in stdout.decode().strip().split('\n') if r.strip()]
+                        dns_results[f"{rtype.lower()}_records"] = records
+                    except:
+                        pass
+            
+            if any(dns_results[k] for k in ["mx_records", "ns_records", "a_records"]):
+                results.append(dns_results)
+            
+            # 2. Subdomain enumeration (basic - using common subdomains)
+            self.log(f"Company OSINT: Subdomain enumeration for {domain}")
+            common_subdomains = ["www", "mail", "webmail", "ftp", "admin", "blog", "dev", "staging", 
+                                 "api", "app", "portal", "vpn", "remote", "secure", "shop", "store"]
+            
+            import socket
+            found_subdomains = []
+            for sub in common_subdomains:
+                subdomain = f"{sub}.{domain}"
+                try:
+                    socket.gethostbyname(subdomain)
+                    found_subdomains.append(subdomain)
+                except:
+                    pass
+            
+            if found_subdomains:
+                results.append({
+                    "type": "subdomains",
+                    "found": found_subdomains
+                })
+            
+            # 3. Check for SPF/DMARC/DKIM (email security)
+            email_security = {
+                "type": "email_security",
+                "has_spf": False,
+                "has_dmarc": False,
+                "has_dkim": False
+            }
+            
+            if shutil.which("dig"):
+                # SPF
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        "dig", "+short", "TXT", domain,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+                    if 'v=spf1' in stdout.decode().lower():
+                        email_security["has_spf"] = True
+                except:
+                    pass
+                
+                # DMARC
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        "dig", "+short", "TXT", f"_dmarc.{domain}",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+                    if 'v=dmarc1' in stdout.decode().lower():
+                        email_security["has_dmarc"] = True
+                except:
+                    pass
+            
+            results.append(email_security)
+            
+            response["data"] = {
+                "domain": domain,
+                "company_name": company_data.get("name"),
+                "results": results,
+                "agent_id": self.agent_id,
+                "agent_hostname": self.hostname,
+                "scanned_at": datetime.utcnow().isoformat()
+            }
+            
+            self.log(f"Company OSINT complete for {domain}: {len(results)} result groups")
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Company OSINT error: {e}", "ERROR")
+        
+        return response
     
     async def run_dns_lookup(self, command_id: str, command_data: dict) -> dict:
         """Perform DNS lookup"""
@@ -5653,10 +6127,46 @@ apt-get install -y speedtest
                 response = await self.run_speedtest(command_id, command_data)
                 self.log(f"Speedtest complete, success: {response.get('success')}")
             
+            # OSINT Commands
+            elif command == "email_osint":
+                self.log(f"Starting email OSINT for command_id: {command_id}")
+                response = await self.run_email_osint(command_id, command_data)
+                self.log(f"Email OSINT complete, success: {response.get('success')}")
+            
+            elif command == "phone_osint":
+                self.log(f"Starting phone OSINT for command_id: {command_id}")
+                response = await self.run_phone_osint(command_id, command_data)
+                self.log(f"Phone OSINT complete, success: {response.get('success')}")
+            
+            elif command == "username_osint":
+                self.log(f"Starting username OSINT for command_id: {command_id}")
+                response = await self.run_username_osint(command_id, command_data)
+                self.log(f"Username OSINT complete, success: {response.get('success')}")
+            
+            elif command == "person_osint":
+                self.log(f"Starting person OSINT for command_id: {command_id}")
+                response = await self.run_person_osint(command_id, command_data)
+                self.log(f"Person OSINT complete, success: {response.get('success')}")
+            
+            elif command == "company_osint":
+                self.log(f"Starting company OSINT for command_id: {command_id}")
+                response = await self.run_company_osint(command_id, command_data)
+                self.log(f"Company OSINT complete, success: {response.get('success')}")
+            
+            elif command == "name_osint":
+                # Name OSINT - use person_osint with name as target
+                self.log(f"Starting name OSINT for command_id: {command_id}")
+                # Convert name to username for lookup
+                name = command_data.get("name") or command_data.get("target", "")
+                username = name.replace(" ", "").lower()
+                response = await self.run_username_osint(command_id, {"username": username})
+                response["data"]["original_name"] = name
+                self.log(f"Name OSINT complete, success: {response.get('success')}")
+            
             elif command == "capabilities":
                 # Return what this agent can do
                 response["data"] = {
-                    "commands": ["ping", "host_ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "dns_server", "dig", "ip_reputation", "domain_reputation", "speedtest", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent", "restart", "run_command", "shell_start", "shell_input", "shell_stop", "shell_resize"],
+                    "commands": ["ping", "host_ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "dns_server", "dig", "ip_reputation", "domain_reputation", "speedtest", "email_osint", "phone_osint", "username_osint", "person_osint", "company_osint", "name_osint", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent", "restart", "run_command", "shell_start", "shell_input", "shell_stop", "shell_resize"],
                     "nmap_available": shutil.which("nmap") is not None,
                     "nikto_available": shutil.which("nikto") is not None,
                     "dirb_available": shutil.which("dirb") is not None,
@@ -5666,6 +6176,9 @@ apt-get install -y speedtest
                     "traceroute_available": shutil.which("traceroute") is not None,
                     "dig_available": shutil.which("dig") is not None,
                     "speedtest_available": shutil.which("speedtest-cli") is not None or shutil.which("speedtest") is not None,
+                    "holehe_available": shutil.which("holehe") is not None,
+                    "phoneinfoga_available": shutil.which("phoneinfoga") is not None,
+                    "maigret_available": shutil.which("maigret") is not None,
                     "version": VERSION,
                     "shell_pty_available": shutil.which("tmux") is not None
                 }
