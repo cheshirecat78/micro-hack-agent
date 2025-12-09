@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.13"
+VERSION = "1.10.14"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -1938,9 +1938,9 @@ class MicroHackAgent:
             loop_count = 0
             while True:
                 loop_count += 1
-                # Use select to check if data is available (with timeout)
+                # Use select to check if data is available (with short timeout for responsiveness)
                 try:
-                    readable, _, _ = _select.select([master_fd], [], [], 0.1)
+                    readable, _, _ = _select.select([master_fd], [], [], 0.01)  # 10ms timeout for fast response
                 except Exception as e:
                     self.log(f"[SHELL] select() failed for {session_id[:8]}: {e}")
                     break
@@ -1950,9 +1950,9 @@ class MicroHackAgent:
                     if proc and proc.poll() is not None:
                         self.log(f"[SHELL] Session {session_id[:8]} process exited with code {proc.returncode}")
                         break
-                    if loop_count % 100 == 0:
+                    if loop_count % 500 == 0:
                         self.log(f"[SHELL] Session {session_id[:8]} waiting for data (loop {loop_count})", "DEBUG")
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.005)  # 5ms sleep - fast but yields to event loop
                     continue
                 
                 try:
@@ -1963,7 +1963,7 @@ class MicroHackAgent:
                 except OSError as e:
                     if e.errno in (_errno.EIO, _errno.EBADF, _errno.EAGAIN, _errno.EWOULDBLOCK):
                         if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
-                            await asyncio.sleep(0.05)
+                            await asyncio.sleep(0.005)  # Quick retry
                             continue
                         self.log(f"[SHELL] Session {session_id[:8]} PTY closed (errno={e.errno})")
                         break
