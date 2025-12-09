@@ -3922,6 +3922,7 @@ class MicroHackAgent:
             response["data"] = {
                 "target": target,
                 "port": port,
+                "port_id": command_data.get("port_id"),
                 "banner": banner,
                 "ssh_version": ssh_version,
                 "software": software,
@@ -4007,6 +4008,7 @@ class MicroHackAgent:
             response["data"] = {
                 "target": target,
                 "port": port,
+                "port_id": command_data.get("port_id"),
                 "banner": banner,
                 "anonymous_allowed": anonymous_allowed,
                 "project_id": project_id,
@@ -4097,6 +4099,7 @@ class MicroHackAgent:
             response["data"] = {
                 "target": target,
                 "port": port,
+                "port_id": command_data.get("port_id"),
                 "banner": banner,
                 "capabilities": capabilities,
                 "supports_starttls": any('STARTTLS' in c.upper() for c in capabilities),
@@ -4187,6 +4190,7 @@ class MicroHackAgent:
             response["data"] = {
                 "target": target,
                 "port": port,
+                "port_id": command_data.get("port_id"),
                 "banner": banner,
                 "capabilities": capabilities,
                 "supports_starttls": any('STARTTLS' in c.upper() for c in capabilities),
@@ -4290,11 +4294,15 @@ class MicroHackAgent:
             response["data"] = {
                 "target": target,
                 "port": port,
+                "port_id": command_data.get("port_id"),
                 "banner": banner,
+                "method": "socket",
+                "service": command_data.get("service"),
                 "project_id": project_id,
                 "scanned_at": datetime.utcnow().isoformat(),
                 "agent_id": self.agent_id,
-                "agent_hostname": self.hostname
+                "agent_name": self.name or self.hostname,
+                "connection_id": f"agent:{self.agent_id}"
             }
             
             await self.send_job_progress(job_id, 100, f"Banner grab complete: {len(banner)} bytes")
@@ -4425,11 +4433,15 @@ class MicroHackAgent:
                     "target": target,
                     "url": url,
                     "port": port,
+                    "port_id": command_data.get("port_id"),
+                    "service": command_data.get("service", "http"),
                     "screenshot": screenshot_data,
+                    "tool": browser,
                     "project_id": project_id,
                     "scanned_at": datetime.utcnow().isoformat(),
                     "agent_id": self.agent_id,
-                    "agent_hostname": self.hostname
+                    "agent_name": self.name or self.hostname,
+                    "connection_id": f"agent:{self.agent_id}"
                 }
                 # Log size info for debugging large responses
                 response_size = len(json.dumps(response))
