@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.12"
+VERSION = "1.10.13"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -1933,34 +1933,39 @@ class MicroHackAgent:
             self.log(f"Session {session_id} has no master_fd", "WARNING")
             return
             
-        self.log(f"Starting PTY reader for session {session_id}", "DEBUG")
+        self.log(f"[SHELL] Starting PTY reader for session {session_id[:8]}, master_fd={master_fd}, proc.pid={proc.pid if proc else 'None'}")
         try:
+            loop_count = 0
             while True:
+                loop_count += 1
                 # Use select to check if data is available (with timeout)
                 try:
                     readable, _, _ = _select.select([master_fd], [], [], 0.1)
-                except Exception:
+                except Exception as e:
+                    self.log(f"[SHELL] select() failed for {session_id[:8]}: {e}")
                     break
                     
                 if not readable:
                     # No data, check if process is still alive
                     if proc and proc.poll() is not None:
-                        self.log(f"Session {session_id} process exited", "DEBUG")
+                        self.log(f"[SHELL] Session {session_id[:8]} process exited with code {proc.returncode}")
                         break
+                    if loop_count % 100 == 0:
+                        self.log(f"[SHELL] Session {session_id[:8]} waiting for data (loop {loop_count})", "DEBUG")
                     await asyncio.sleep(0.05)
                     continue
                 
                 try:
                     data = _os.read(master_fd, 4096)
                     if not data:
-                        self.log(f"Session {session_id} reader got EOF", "DEBUG")
+                        self.log(f"[SHELL] Session {session_id[:8]} reader got EOF")
                         break
                 except OSError as e:
                     if e.errno in (_errno.EIO, _errno.EBADF, _errno.EAGAIN, _errno.EWOULDBLOCK):
                         if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
                             await asyncio.sleep(0.05)
                             continue
-                        self.log(f"Session {session_id} PTY closed", "DEBUG")
+                        self.log(f"[SHELL] Session {session_id[:8]} PTY closed (errno={e.errno})")
                         break
                     raise
                     
@@ -1969,7 +1974,7 @@ class MicroHackAgent:
                 except Exception:
                     output = str(data)
                     
-                self.log(f"Session {session_id} read {len(data)} bytes", "DEBUG")
+                self.log(f"[SHELL] Session {session_id[:8]} read {len(data)} bytes, sending shell_output")
                 
                 # Send shell_output message
                 if self.ws:
@@ -1982,10 +1987,13 @@ class MicroHackAgent:
                             "timestamp": datetime.utcnow().isoformat()
                         })
                         await self.ws.send(msg)
+                        self.log(f"[SHELL] Sent shell_output for session {session_id[:8]}")
                     except Exception as e:
-                        self.log(f"Failed to send shell_output: {e}", "WARNING")
+                        self.log(f"[SHELL] Failed to send shell_output: {e}", "WARNING")
                         if not self.ws:
                             break
+                else:
+                    self.log(f"[SHELL] No WebSocket, cannot send shell_output", "WARNING")
                             
         except Exception as e:
             self.log(f"Session reader error for {session_id}: {e}", "WARNING")
@@ -2004,9 +2012,10 @@ class MicroHackAgent:
     async def write_shell_input(self, session_id: str, input_str: str) -> tuple[bool, str]:
         """Write input to PTY master for a given session."""
         import os as _os
+        self.log(f"[SHELL] write_shell_input called: session={session_id[:8] if session_id else 'None'}, input={input_str!r}")
         sess = self.shell_sessions.get(session_id)
         if not sess:
-            self.log(f'write_shell_input: Session {session_id} not found', 'WARNING')
+            self.log(f'[SHELL] write_shell_input: Session {session_id[:8] if session_id else "None"} not found, active sessions: {list(self.shell_sessions.keys())[:3]}', 'WARNING')
             return False, "Session not found"
         
         master_fd = sess.get('master_fd')
@@ -2019,9 +2028,10 @@ class MicroHackAgent:
             else:
                 data = bytes(input_str)
             _os.write(master_fd, data)
-            self.log(f'Wrote to shell session {session_id}: {input_str!r}', 'DEBUG')
+            self.log(f'[SHELL] Wrote {len(data)} bytes to session {session_id[:8]}')
             return True, ""
         except Exception as e:
+            self.log(f'[SHELL] write_shell_input error: {e}', 'ERROR')
             return False, str(e)
 
     async def resize_shell_session(self, session_id: str, rows: int, cols: int) -> tuple[bool, str]:
