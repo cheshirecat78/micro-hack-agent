@@ -68,7 +68,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatusCode
 # AGENT VERSION & AUTO-UPDATE
 # =============================================================================
 
-VERSION = "1.10.11"
+VERSION = "1.10.12"
 try:
     # Look for an agent/VERSION file to override the baked-in version. This
     # allows us to bump the version file and let the code always read the
@@ -1842,12 +1842,12 @@ class MicroHackAgent:
             self.log(f"Failed to send job output: {e}", "WARNING")
 
     async def start_shell_session(self, command_id: str, command: str) -> dict:
-        """Start a simple pipe-based shell session and stream output back to server.
+        """Start a PTY-based shell session and stream output back to server.
 
         Returns a response dict including session_id on success.
         """
         import uuid as _uuid
-        import shlex as _shlex
+        import os as _os
 
         response = {
             "type": "response",
@@ -1859,29 +1859,46 @@ class MicroHackAgent:
         session_id = str(_uuid.uuid4())
         
         try:
-            # Simple pipe-based approach - no PTY complexity
-            self.log(f"Starting simple pipe shell: {command}", "DEBUG")
+            self.log(f"Starting PTY shell: {command}", "DEBUG")
+            
+            # Create PTY pair
+            master_fd, slave_fd = _os.openpty()
+            
+            # Set terminal size
+            try:
+                import fcntl, termios, struct
+                winsize = struct.pack('HHHH', 24, 80, 0, 0)
+                fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+            except Exception as e:
+                self.log(f"Could not set terminal size: {e}", "DEBUG")
             
             # Set up environment
             env = os.environ.copy()
-            env['TERM'] = 'dumb'  # Simple terminal
+            env['TERM'] = 'xterm-256color'
             
-            # Start shell with pipes
+            # Start shell with PTY
             proc = subprocess.Popen(
                 command,
                 shell=True,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
                 env=env,
-                bufsize=0  # Unbuffered
+                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
             )
+            
+            # Close slave in parent - child has it
+            _os.close(slave_fd)
+            
+            # Make master non-blocking for async reading
+            import fcntl
+            flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+            fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
             
             # Save session
             self.shell_sessions[session_id] = {
                 "process": proc,
-                "stdin": proc.stdin,
-                "stdout": proc.stdout
+                "master_fd": master_fd
             }
 
             # Start reader task
@@ -1899,32 +1916,53 @@ class MicroHackAgent:
             return response
 
     async def _session_reader(self, session_id: str):
-        """Read from stdout and send shell_output messages to the server."""
-        loop = asyncio.get_event_loop()
+        """Read from PTY master and send shell_output messages to the server."""
+        import os as _os
+        import errno as _errno
+        import select as _select
+        
         sess = self.shell_sessions.get(session_id)
         if not sess:
             self.log(f"Session {session_id} not found in reader", "WARNING")
             return
         
-        stdout = sess.get("stdout")
+        master_fd = sess.get("master_fd")
         proc = sess.get("process")
         
-        if not stdout:
-            self.log(f"Session {session_id} has no stdout", "WARNING")
+        if not master_fd:
+            self.log(f"Session {session_id} has no master_fd", "WARNING")
             return
             
-        self.log(f"Starting reader for session {session_id}", "DEBUG")
+        self.log(f"Starting PTY reader for session {session_id}", "DEBUG")
         try:
             while True:
+                # Use select to check if data is available (with timeout)
                 try:
-                    # Read using executor to avoid blocking event loop
-                    data = await loop.run_in_executor(None, stdout.read, 1024)
+                    readable, _, _ = _select.select([master_fd], [], [], 0.1)
+                except Exception:
+                    break
+                    
+                if not readable:
+                    # No data, check if process is still alive
+                    if proc and proc.poll() is not None:
+                        self.log(f"Session {session_id} process exited", "DEBUG")
+                        break
+                    await asyncio.sleep(0.05)
+                    continue
+                
+                try:
+                    data = _os.read(master_fd, 4096)
                     if not data:
                         self.log(f"Session {session_id} reader got EOF", "DEBUG")
                         break
-                except Exception as e:
-                    self.log(f"Session {session_id} read error: {e}", "DEBUG")
-                    break
+                except OSError as e:
+                    if e.errno in (_errno.EIO, _errno.EBADF, _errno.EAGAIN, _errno.EWOULDBLOCK):
+                        if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                            await asyncio.sleep(0.05)
+                            continue
+                        self.log(f"Session {session_id} PTY closed", "DEBUG")
+                        break
+                    raise
                     
                 try:
                     output = data.decode('utf-8', errors='replace')
@@ -1949,14 +1987,14 @@ class MicroHackAgent:
                         if not self.ws:
                             break
                             
-                # Check if process exited
-                if proc and proc.poll() is not None:
-                    break
-                    
         except Exception as e:
             self.log(f"Session reader error for {session_id}: {e}", "WARNING")
         finally:
             self.log(f"Session {session_id} reader exiting, cleaning up", "DEBUG")
+            try:
+                _os.close(master_fd)
+            except Exception:
+                pass
             # Clean up session
             if session_id in self.shell_sessions:
                 del self.shell_sessions[session_id]
@@ -1964,40 +2002,55 @@ class MicroHackAgent:
                 del self._session_tasks[session_id]
 
     async def write_shell_input(self, session_id: str, input_str: str) -> tuple[bool, str]:
-        """Write input to stdin for a given session."""
+        """Write input to PTY master for a given session."""
+        import os as _os
         sess = self.shell_sessions.get(session_id)
         if not sess:
             self.log(f'write_shell_input: Session {session_id} not found', 'WARNING')
             return False, "Session not found"
         
-        stdin = sess.get('stdin')
-        if not stdin:
-            return False, "Invalid session - no stdin"
+        master_fd = sess.get('master_fd')
+        if not master_fd:
+            return False, "Invalid session - no master_fd"
             
         try:
             if isinstance(input_str, str):
                 data = input_str.encode('utf-8')
             else:
                 data = bytes(input_str)
-            stdin.write(data)
-            stdin.flush()
+            _os.write(master_fd, data)
             self.log(f'Wrote to shell session {session_id}: {input_str!r}', 'DEBUG')
             return True, ""
         except Exception as e:
             return False, str(e)
 
     async def resize_shell_session(self, session_id: str, rows: int, cols: int) -> tuple[bool, str]:
-        """Resize not supported for simple pipe shell."""
-        # No-op for pipe-based shells
-        return True, ""
+        """Resize PTY window size."""
+        sess = self.shell_sessions.get(session_id)
+        if not sess:
+            return False, "Session not found"
+        master_fd = sess.get('master_fd')
+        if not master_fd:
+            return False, "Invalid session"
+
+        try:
+            import fcntl, termios, struct
+            winsize = struct.pack('HHHH', int(rows), int(cols), 0, 0)
+            fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+            return True, ""
+        except Exception as e:
+            return False, str(e)
 
     async def stop_shell_session(self, session_id: str) -> tuple[bool, str]:
         """Stop a shell session and clean up resources."""
+        import os as _os
         sess = self.shell_sessions.get(session_id)
         if not sess:
             return False, "Session not found"
             
         proc = sess.get('process')
+        master_fd = sess.get('master_fd')
+        
         try:
             if proc and proc.poll() is None:
                 proc.terminate()
@@ -2014,17 +2067,10 @@ class MicroHackAgent:
                 except asyncio.CancelledError:
                     pass
                     
-            # Close streams
-            stdin = sess.get('stdin')
-            stdout = sess.get('stdout')
-            if stdin:
+            # Close master fd
+            if master_fd:
                 try:
-                    stdin.close()
-                except:
-                    pass
-            if stdout:
-                try:
-                    stdout.close()
+                    _os.close(master_fd)
                 except:
                     pass
                     
