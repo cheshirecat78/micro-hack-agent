@@ -5897,6 +5897,297 @@ apt-get install -y speedtest
         
         return response
     
+    async def _check_upnp(self, command_id: str) -> dict:
+        """Check if UPnP is available on the router and can open ports"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {
+                "upnp_available": False,
+                "gateway": None,
+                "external_ip": None,
+                "can_add_mapping": False,
+                "existing_mappings": [],
+                "error": None
+            }
+        }
+        
+        try:
+            # Try to use miniupnpc if available
+            try:
+                import miniupnpc
+                upnp = miniupnpc.UPnP()
+                upnp.discoverdelay = 2000  # 2 seconds
+                
+                self.log("Discovering UPnP devices...")
+                devices = upnp.discover()
+                
+                if devices > 0:
+                    upnp.selectigd()
+                    response["data"]["upnp_available"] = True
+                    response["data"]["gateway"] = upnp.lanaddr
+                    
+                    try:
+                        external_ip = upnp.externalipaddress()
+                        response["data"]["external_ip"] = external_ip
+                    except:
+                        pass
+                    
+                    # Try to add a test mapping (then remove it)
+                    test_port = 65432
+                    try:
+                        # Add mapping
+                        result = upnp.addportmapping(
+                            test_port, 'TCP', upnp.lanaddr, test_port,
+                            'micro-hack-test', ''
+                        )
+                        if result:
+                            response["data"]["can_add_mapping"] = True
+                            # Remove the test mapping
+                            upnp.deleteportmapping(test_port, 'TCP')
+                    except Exception as e:
+                        response["data"]["mapping_error"] = str(e)
+                    
+                    # Get existing mappings
+                    try:
+                        i = 0
+                        while True:
+                            mapping = upnp.getgenericportmapping(i)
+                            if mapping is None:
+                                break
+                            response["data"]["existing_mappings"].append({
+                                "external_port": mapping[0],
+                                "protocol": mapping[1],
+                                "internal_host": mapping[2][0],
+                                "internal_port": mapping[2][1],
+                                "description": mapping[3],
+                                "enabled": mapping[4],
+                                "duration": mapping[5]
+                            })
+                            i += 1
+                            if i > 100:  # Safety limit
+                                break
+                    except:
+                        pass
+                else:
+                    response["data"]["error"] = "No UPnP devices found"
+                    
+            except ImportError:
+                # miniupnpc not installed, try upnpc command line tool
+                upnpc_path = shutil.which("upnpc") or shutil.which("upnpc-static")
+                if upnpc_path:
+                    # Run upnpc -s to get status
+                    proc = subprocess.run([upnpc_path, "-s"], capture_output=True, text=True, timeout=10)
+                    output = proc.stdout + proc.stderr
+                    
+                    if "No IGD UPnP Device found" in output:
+                        response["data"]["error"] = "No UPnP devices found"
+                    elif "Found valid IGD" in output or "external IP" in output.lower():
+                        response["data"]["upnp_available"] = True
+                        # Parse external IP
+                        for line in output.split('\n'):
+                            if 'external' in line.lower() and 'ip' in line.lower():
+                                parts = line.split()
+                                for part in parts:
+                                    if part.count('.') == 3:
+                                        response["data"]["external_ip"] = part
+                                        break
+                        
+                        # Try to test port mapping
+                        test_port = 65432
+                        proc = subprocess.run(
+                            [upnpc_path, "-a", self.local_ip, str(test_port), str(test_port), "TCP"],
+                            capture_output=True, text=True, timeout=10
+                        )
+                        if proc.returncode == 0 or "success" in proc.stdout.lower():
+                            response["data"]["can_add_mapping"] = True
+                            # Remove test mapping
+                            subprocess.run([upnpc_path, "-d", str(test_port), "TCP"], 
+                                         capture_output=True, timeout=5)
+                else:
+                    response["data"]["error"] = "UPnP tools not available (install miniupnpc or upnpc)"
+                    response["data"]["install_hint"] = "pip install miniupnpc OR apt install miniupnpc"
+                    
+        except subprocess.TimeoutExpired:
+            response["data"]["error"] = "UPnP discovery timed out"
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"UPnP check error: {e}", "ERROR")
+        
+        return response
+    
+    async def _redeploy_agent(self, command_id: str) -> dict:
+        """Re-download and restart the agent (fresh deployment)"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {
+                "message": "Agent redeploying...",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        }
+        
+        try:
+            self.log("Starting redeploy: downloading fresh agent...")
+            
+            # Download fresh agent code
+            import urllib.request
+            with urllib.request.urlopen(AGENT_UPDATE_URL, timeout=30) as resp:
+                new_code = resp.read().decode('utf-8')
+            
+            # Validate the downloaded code
+            if not new_code.strip().startswith(('#', 'import', 'from', '"""', "'''")):
+                response["success"] = False
+                response["error"] = "Downloaded code doesn't look like valid Python"
+                return response
+            
+            # Get current script path
+            current_script = os.path.abspath(__file__)
+            
+            # Write new code
+            with open(current_script, 'w') as f:
+                f.write(new_code)
+            
+            self.log("Fresh agent downloaded, restarting...")
+            
+            # Send response before restarting
+            if self.ws:
+                await self.ws.send(json.dumps(response))
+            
+            await asyncio.sleep(0.5)
+            os.execv(sys.executable, [sys.executable, current_script] + sys.argv[1:])
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            self.log(f"Redeploy error: {e}", "ERROR")
+        
+        return response
+    
+    async def _destroy_agent(self, command_id: str) -> dict:
+        """Clean up everything and terminate the agent"""
+        response = {
+            "type": "response",
+            "command_id": command_id,
+            "success": True,
+            "data": {
+                "message": "Agent destroying itself...",
+                "cleanup_steps": [],
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        }
+        
+        cleanup_steps = []
+        
+        try:
+            # 1. Stop any running shell sessions
+            try:
+                if hasattr(self, 'shell_sessions') and self.shell_sessions:
+                    for session_id in list(self.shell_sessions.keys()):
+                        await self.stop_shell_session(session_id)
+                    cleanup_steps.append("Stopped shell sessions")
+            except Exception as e:
+                cleanup_steps.append(f"Shell cleanup: {e}")
+            
+            # 2. Stop webserver if running
+            try:
+                if hasattr(self, '_local_webserver') and self._local_webserver:
+                    await self._stop_webserver(command_id)
+                    cleanup_steps.append("Stopped webserver")
+            except Exception as e:
+                cleanup_steps.append(f"Webserver cleanup: {e}")
+            
+            # 3. Clean up Docker containers created by this agent (if any)
+            try:
+                docker_path = shutil.which("docker")
+                if docker_path:
+                    # Find and stop containers with micro-hack label
+                    proc = subprocess.run(
+                        [docker_path, "ps", "-aq", "--filter", "label=micro-hack-agent"],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    container_ids = proc.stdout.strip().split('\n')
+                    container_ids = [c for c in container_ids if c]
+                    
+                    if container_ids:
+                        for cid in container_ids:
+                            subprocess.run([docker_path, "rm", "-f", cid], 
+                                         capture_output=True, timeout=10)
+                        cleanup_steps.append(f"Removed {len(container_ids)} Docker container(s)")
+            except Exception as e:
+                cleanup_steps.append(f"Docker cleanup: {e}")
+            
+            # 4. Clean up virtual environments
+            try:
+                agent_dir = os.path.dirname(os.path.abspath(__file__))
+                venv_paths = [
+                    os.path.join(agent_dir, 'venv'),
+                    os.path.join(agent_dir, '.venv'),
+                    os.path.join(agent_dir, 'env'),
+                ]
+                for venv_path in venv_paths:
+                    if os.path.exists(venv_path) and os.path.isdir(venv_path):
+                        shutil.rmtree(venv_path, ignore_errors=True)
+                        cleanup_steps.append(f"Removed virtualenv: {venv_path}")
+            except Exception as e:
+                cleanup_steps.append(f"Venv cleanup: {e}")
+            
+            # 5. Remove micro-hack/micro-dam directories
+            try:
+                home_dir = os.path.expanduser("~")
+                dirs_to_remove = [
+                    os.path.join(home_dir, 'micro-dam'),
+                    os.path.join(home_dir, 'micro-hack'),
+                    os.path.join(home_dir, '.micro-hack'),
+                    os.path.join(home_dir, '.micro-dam'),
+                ]
+                for dir_path in dirs_to_remove:
+                    if os.path.exists(dir_path) and os.path.isdir(dir_path):
+                        shutil.rmtree(dir_path, ignore_errors=True)
+                        cleanup_steps.append(f"Removed directory: {dir_path}")
+            except Exception as e:
+                cleanup_steps.append(f"Directory cleanup: {e}")
+            
+            # 6. Remove agent script and backup
+            agent_script = os.path.abspath(__file__)
+            backup_script = agent_script + ".backup"
+            
+            response["data"]["cleanup_steps"] = cleanup_steps
+            response["data"]["final_step"] = "Terminating agent process"
+            
+            # Send response before termination
+            if self.ws:
+                await self.ws.send(json.dumps(response))
+                await asyncio.sleep(0.5)
+                try:
+                    await self.ws.close()
+                except:
+                    pass
+            
+            # Remove script files (do this last)
+            try:
+                if os.path.exists(backup_script):
+                    os.remove(backup_script)
+                if os.path.exists(agent_script):
+                    os.remove(agent_script)
+            except Exception as e:
+                self.log(f"Could not remove agent script: {e}", "WARNING")
+            
+            # Terminate the process
+            self.log("Agent destroyed, terminating...")
+            os._exit(0)
+            
+        except Exception as e:
+            response["success"] = False
+            response["error"] = str(e)
+            response["data"]["cleanup_steps"] = cleanup_steps
+            self.log(f"Destroy error: {e}", "ERROR")
+        
+        return response
+    
     async def handle_command(self, data: dict):
         """Handle a command from the server"""
         import time
@@ -6166,7 +6457,7 @@ apt-get install -y speedtest
             elif command == "capabilities":
                 # Return what this agent can do
                 response["data"] = {
-                    "commands": ["ping", "host_ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "dns_server", "dig", "ip_reputation", "domain_reputation", "speedtest", "email_osint", "phone_osint", "username_osint", "person_osint", "company_osint", "name_osint", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent", "restart", "run_command", "shell_start", "shell_input", "shell_stop", "shell_resize"],
+                    "commands": ["ping", "host_ping", "info", "echo", "nmap", "nikto", "dirb", "sslscan", "gobuster", "whatweb", "traceroute", "ssh_audit", "ftp_anon", "smtp", "imap", "banner", "screenshot", "http_headers", "robots", "dns", "dns_server", "dig", "ip_reputation", "domain_reputation", "speedtest", "email_osint", "phone_osint", "username_osint", "person_osint", "company_osint", "name_osint", "capabilities", "install_tool", "uninstall_tool", "check_tools", "update_agent", "restart", "redeploy", "destroy", "check_upnp", "run_command", "shell_start", "shell_input", "shell_stop", "shell_resize"],
                     "nmap_available": shutil.which("nmap") is not None,
                     "nikto_available": shutil.which("nikto") is not None,
                     "dirb_available": shutil.which("dirb") is not None,
@@ -6179,6 +6470,7 @@ apt-get install -y speedtest
                     "holehe_available": shutil.which("holehe") is not None,
                     "phoneinfoga_available": shutil.which("phoneinfoga") is not None,
                     "maigret_available": shutil.which("maigret") is not None,
+                    "upnp_available": shutil.which("upnpc") is not None or shutil.which("upnpc-static") is not None,
                     "version": VERSION,
                     "shell_pty_available": shutil.which("tmux") is not None
                 }
@@ -6310,6 +6602,21 @@ apt-get install -y speedtest
                         "url": f"http://{self.local_ip}:{self._webserver_port}" if self._webserver_enabled else None
                     }
                 }
+            
+            elif command == "check_upnp":
+                # Check UPnP availability on router
+                response = await self._check_upnp(command_id)
+            
+            elif command == "redeploy":
+                # Re-download and restart the agent
+                self.log(f"Redeploy requested via command_id: {command_id}")
+                response = await self._redeploy_agent(command_id)
+            
+            elif command == "destroy":
+                # Clean up everything and terminate
+                self.log(f"Destroy requested via command_id: {command_id}")
+                response = await self._destroy_agent(command_id)
+            
             else:
                 response["success"] = False
                 response["error"] = f"Unknown command: {command}"
