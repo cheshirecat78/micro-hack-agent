@@ -4399,6 +4399,7 @@ class MicroHackAgent:
                 "--window-size=1280,1024",
                 "--hide-scrollbars",
                 "--timeout=60000",  # 60 second page load timeout
+                "--virtual-time-budget=3000",  # Wait 3 seconds for JS to render
                 url
             ]
             
